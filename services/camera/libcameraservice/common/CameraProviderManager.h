@@ -46,6 +46,11 @@
 
 namespace android {
 
+namespace hardware::camera::device::V1_0 {
+struct ICameraDevice;
+struct ICameraDeviceCallback;
+}  // namespace hardware::camera::device::V1_0
+
 using hardware::camera2::utils::CameraIdAndSessionConfiguration;
 
 enum class CameraDeviceStatus : uint32_t {
@@ -415,6 +420,15 @@ public:
             const sp<hardware::camera::device::V3_2::ICameraDeviceCallback>& callback,
             /*out*/
             sp<hardware::camera::device::V3_2::ICameraDeviceSession> *session);
+
+    /**
+     * Open a HIDL camera device@1.0 (HALv1) device. The device interface itself
+     * carries the session; defined only when TARGET_HAS_LEGACY_CAMERA_HAL1 is set.
+     */
+    status_t openHidlSession1(const std::string &id,
+            const sp<hardware::camera::device::V1_0::ICameraDeviceCallback>& callback,
+            /*out*/
+            sp<hardware::camera::device::V1_0::ICameraDevice> *session);
 
     /**
      * Notify that the camera or torch is no longer being used by a camera client
@@ -904,7 +918,16 @@ private:
     // Utility to find a DeviceInfo by ID; pointer is only valid while mInterfaceMutex is held
     // and the calling code doesn't mutate the list of providers or their lists of devices.
     // No guarantees on the order of traversal
+    // With TARGET_HAS_LEGACY_CAMERA_HAL1, an ID that only a HIDL device@1.0 publishes
+    // resolves to that HALv1 device; any HALv3 or AIDL device for the ID wins over it.
     ProviderInfo::DeviceInfo* findDeviceInfoLocked(const std::string& id) const;
+
+    // The HIDL device@1.0 (HALv1) device published for this ID, or nullptr.
+    ProviderInfo::DeviceInfo* findDeviceInfo1Locked(const std::string& id) const;
+
+    // Whether deviceInfo belongs to a HIDL provider as a device@1.0 device, which has no
+    // HALv3 or AIDL session interface.
+    bool isHidlDevice1Locked(const ProviderInfo::DeviceInfo* deviceInfo) const;
 
     bool isCompositeJpegRDisabledLocked(const std::string &id) const;
 

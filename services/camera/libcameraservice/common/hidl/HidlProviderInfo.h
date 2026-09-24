@@ -68,6 +68,11 @@ struct HidlProviderInfo : public CameraProviderManager::ProviderInfo,
     sp<hardware::camera::device::V3_2::ICameraDevice>
             startDeviceInterface(const std::string &deviceName);
 
+    // The same for a device@1.0 (HALv1) device name; defined only with
+    // TARGET_HAS_LEGACY_CAMERA_HAL1.
+    sp<hardware::camera::device::V1_0::ICameraDevice>
+            startDeviceInterface1(const std::string &deviceName);
+
     // ICameraProviderCallbacks interface - these lock the parent mInterfaceMutex
     hardware::Return<void> cameraDeviceStatusChange(
             const hardware::hidl_string& ,
@@ -111,11 +116,47 @@ struct HidlProviderInfo : public CameraProviderManager::ProviderInfo,
         sp<hardware::camera::device::V3_2::ICameraDevice> startDeviceInterface();
     };
 
+    // A device@1.0 (HALv1) device: no static metadata, so it serves the Camera1 API
+    // only. Defined only with TARGET_HAS_LEGACY_CAMERA_HAL1.
+    struct HidlDeviceInfo1 : public CameraProviderManager::ProviderInfo::DeviceInfo {
+        typedef hardware::camera::device::V1_0::ICameraDevice InterfaceT;
+
+        sp<IBase> mSavedInterface = nullptr;
+
+        HidlDeviceInfo1(const std::string& name, const metadata_vendor_id_t tagId,
+                const std::string &id, uint16_t minorVersion,
+                const CameraResourceCost& resourceCost,
+                sp<ProviderInfo> parentProvider,
+                const std::vector<std::string>& publicCameraIds,
+                sp<InterfaceT> interface,
+                const hardware::CameraInfo& info,
+                bool hasFlashUnit);
+
+        ~HidlDeviceInfo1() {}
+
+        virtual status_t setTorchMode(bool enabled) override;
+        virtual status_t turnOnTorchWithStrengthLevel(int32_t torchStrength) override;
+        virtual status_t getTorchStrengthLevel(int32_t *torchStrength) override;
+        virtual status_t getCameraInfo(int rotationOverride, int *portraitRotation,
+                hardware::CameraInfo *info) const override;
+        // Every HALv1 device is backward compatible by definition.
+        virtual bool isAPI1Compatible() const override { return true; }
+        virtual status_t dumpState(int fd) override;
+        virtual status_t filterSmallJpegSizes() override { return INVALID_OPERATION; }
+
+        sp<InterfaceT> startDeviceInterface();
+    };
+
  private:
 
     virtual std::unique_ptr<DeviceInfo> initializeDeviceInfo(const std::string &,
             const metadata_vendor_id_t , const std::string &,
             uint16_t ) override;
+
+    // initializeDeviceInfo() for a device@1.0 name; defined only with
+    // TARGET_HAS_LEGACY_CAMERA_HAL1.
+    std::unique_ptr<DeviceInfo> initializeDeviceInfo1(const std::string &name,
+            const metadata_vendor_id_t tagId, const std::string &id, uint16_t minorVersion);
     virtual status_t reCacheConcurrentStreamingCameraIdsLocked() override;
 
     //Expects to have mLock locked

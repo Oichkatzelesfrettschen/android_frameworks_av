@@ -205,7 +205,16 @@ cc_library {
         "utils/LatencyHistogram.cpp",
         "utils/Utils.cpp",
         "utils/VirtualDeviceCameraIdMapper.cpp",
-    ],
+    ] + select(soong_config_variable("camera", "legacy_hal1"), {
+        // HIDL camera device@1.0 (HALv1) support for API1 clients. A device
+        // whose provider publishes device@1.0 names sets it from its board
+        // config: $(call soong_config_set,camera,legacy_hal1,true)
+        "true": [
+            "api1/CameraClient.cpp",
+            "device1/CameraHardwareInterface.cpp",
+        ],
+        default: [],
+    }),
 
     header_libs: [
         "libdynamic_depth-internal_headers",
@@ -235,7 +244,10 @@ cc_library {
         "-Wextra",
         "-Werror",
         "-Wno-ignored-qualifiers",
-    ],
+    ] + select(soong_config_variable("camera", "legacy_hal1"), {
+        "true": ["-DTARGET_HAS_LEGACY_CAMERA_HAL1"],
+        default: [],
+    }),
 }
 
 cc_library_static {

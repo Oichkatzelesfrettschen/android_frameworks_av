@@ -85,6 +85,7 @@ class CameraService :
 {
     friend class BinderService<CameraService>;
     friend class CameraOfflineSessionClient;
+    friend class CameraClient;
 public:
     class Client;
     class BasicClient;

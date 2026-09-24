@@ -81,6 +81,9 @@
 
 #include "CameraService.h"
 #include "api1/Camera2Client.h"
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+#include "api1/CameraClient.h"
+#endif
 #include "api2/CameraDeviceClient.h"
 #include "utils/CameraServiceProxyWrapper.h"
 #include "utils/CameraTraces.h"
@@ -1500,6 +1503,21 @@ Status CameraService::makeClient(
         int deviceVersion = deviceVersionAndTransport.first;
         switch(deviceVersion) {
             case CAMERA_DEVICE_API_VERSION_1_0:
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+                // A HALv1 device carries no static metadata, so only the
+                // Camera1 API can drive it.
+                if (effectiveApiLevel == API_1) {
+                    sp<ICameraClient> tmp = static_cast<ICameraClient*>(cameraCb.get());
+                    *client = new CameraClient(cameraService, tmp,
+                            cameraService->mCameraServiceProxyWrapper,
+                            cameraService->mAttributionAndPermissionUtils, clientAttribution,
+                            callingPid, cameraId, api1CameraId, facing, sensorOrientation,
+                            servicePid, rotationOverride, /*sharedMode*/false);
+                    ALOGI("%s: Camera1 API (HALv1 device), rotationOverride %d", __FUNCTION__,
+                            rotationOverride);
+                    return Status::ok();
+                }
+#endif
                 ALOGE("Camera using old HAL version: %d", deviceVersion);
                 return STATUS_ERROR_FMT(ERROR_DEPRECATED_HAL,
                         "Camera device \"%s\" HAL version %d no longer supported",

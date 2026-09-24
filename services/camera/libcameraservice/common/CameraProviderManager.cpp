@@ -24,6 +24,9 @@
 #include "CameraProviderManager.h"
 
 #include <aidl/android/hardware/camera/device/ICameraDevice.h>
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+#include <android/hardware/camera/device/1.0/ICameraDevice.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -772,6 +775,13 @@ status_t CameraProviderManager::openAidlSession(const std::string &id,
 
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
+#endif
 
     auto *aidlDeviceInfo3 = static_cast<AidlProviderInfo::AidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
@@ -814,6 +824,13 @@ status_t CameraProviderManager::openAidlInjectionSession(const std::string &id,
 
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
+#endif
 
     auto *aidlDeviceInfo3 = static_cast<AidlProviderInfo::AidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
@@ -853,6 +870,13 @@ status_t CameraProviderManager::openHidlSession(const std::string &id,
 
     auto deviceInfo = findDeviceInfoLocked(id);
     if (deviceInfo == nullptr) return NAME_NOT_FOUND;
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+    if (isHidlDevice1Locked(deviceInfo)) {
+        ALOGE("%s: Camera device %s is a HALv1 device without a session interface",
+                __FUNCTION__, id.c_str());
+        return INVALID_OPERATION;
+    }
+#endif
 
     auto *hidlDeviceInfo3 = static_cast<HidlProviderInfo::HidlDeviceInfo3*>(deviceInfo);
     sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
@@ -890,6 +914,53 @@ status_t CameraProviderManager::openHidlSession(const std::string &id,
     }
     return HidlProviderInfo::mapToStatusT(status);
 }
+
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+status_t CameraProviderManager::openHidlSession1(const std::string &id,
+        const sp<device::V1_0::ICameraDeviceCallback>& callback,
+        /*out*/
+        sp<device::V1_0::ICameraDevice> *session) {
+
+    std::lock_guard<std::mutex> lock(mInterfaceMutex);
+
+    auto deviceInfo = findDeviceInfo1Locked(id);
+    if (deviceInfo == nullptr) return NAME_NOT_FOUND;
+
+    auto *hidlDeviceInfo1 = static_cast<HidlProviderInfo::HidlDeviceInfo1*>(deviceInfo);
+    sp<ProviderInfo> parentProvider = deviceInfo->mParentProvider.promote();
+    if (parentProvider == nullptr) {
+        return DEAD_OBJECT;
+    }
+    const sp<provider::V2_4::ICameraProvider> provider =
+            static_cast<HidlProviderInfo *>(parentProvider.get())->startProviderInterface();
+    if (provider == nullptr) {
+        return DEAD_OBJECT;
+    }
+    std::shared_ptr<HalCameraProvider> halCameraProvider =
+            std::make_shared<HidlHalCameraProvider>(provider, provider->descriptor);
+    saveRef(DeviceMode::CAMERA, id, halCameraProvider);
+
+    auto interface = hidlDeviceInfo1->startDeviceInterface();
+    if (interface == nullptr) {
+        removeRef(DeviceMode::CAMERA, id);
+        return DEAD_OBJECT;
+    }
+
+    hardware::Return<Status> status = interface->open(callback);
+    if (!status.isOk()) {
+        removeRef(DeviceMode::CAMERA, id);
+        ALOGE("%s: Transaction error opening camera device %s: %s",
+                __FUNCTION__, id.c_str(), status.description().c_str());
+        return DEAD_OBJECT;
+    }
+    if (status != Status::OK) {
+        removeRef(DeviceMode::CAMERA, id);
+        return HidlProviderInfo::mapToStatusT(status);
+    }
+    *session = interface;
+    return OK;
+}
+#endif
 
 void CameraProviderManager::saveRef(DeviceMode usageType, const std::string &cameraId,
         std::shared_ptr<HalCameraProvider> provider) {
@@ -1050,8 +1121,39 @@ CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDevi
             }
         }
     }
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+    return findDeviceInfo1Locked(id);
+#else
+    return nullptr;
+#endif
+}
+
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+CameraProviderManager::ProviderInfo::DeviceInfo* CameraProviderManager::findDeviceInfo1Locked(
+        const std::string& id) const {
+    for (auto& provider : mProviders) {
+        if (provider->getIPCTransport() != IPCTransport::HIDL) continue;
+        for (auto& deviceInfo : provider->mDevices) {
+            if (deviceInfo->mId == id && deviceInfo->mVersion.get_major() == 1) {
+                return deviceInfo.get();
+            }
+        }
+    }
     return nullptr;
 }
+
+bool CameraProviderManager::isHidlDevice1Locked(
+        const ProviderInfo::DeviceInfo* deviceInfo) const {
+    if (deviceInfo == nullptr || deviceInfo->mVersion.get_major() != 1) return false;
+    for (auto& provider : mProviders) {
+        if (provider->getIPCTransport() != IPCTransport::HIDL) continue;
+        for (auto& providerDevice : provider->mDevices) {
+            if (providerDevice.get() == deviceInfo) return true;
+        }
+    }
+    return false;
+}
+#endif
 
 metadata_vendor_id_t CameraProviderManager::getProviderTagIdLocked(
         const std::string& id) const {
@@ -2664,6 +2766,9 @@ status_t CameraProviderManager::ProviderInfo::addDevice(
     switch (transport) {
         case IPCTransport::HIDL:
             switch (major) {
+#ifdef TARGET_HAS_LEGACY_CAMERA_HAL1
+                case 1:
+#endif
                 case 3:
                     break;
                 default:

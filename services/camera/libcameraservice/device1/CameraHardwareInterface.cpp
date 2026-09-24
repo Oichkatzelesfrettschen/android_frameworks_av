@@ -17,6 +17,7 @@
 //#define LOG_NDEBUG 0
 
 #include <inttypes.h>
+#include <vector>
 #include <media/hardware/HardwareAPI.h> // For VideoNativeHandleMetadata
 #include "CameraHardwareInterface.h"
 #include "common/hidl/HidlProviderInfo.h"
@@ -130,9 +131,29 @@ hardware::Return<void> CameraHardwareInterface::dataCallback(
         }
         mem = mHidlMemPoolMap.at(data);
     }
+    // V1_0::CameraFace carries the AOSP face fields only, while camera_face_t
+    // from system/core's camera.h also carries the vendor extension fields
+    // after mouth, so ICameraClient serializes sizeof(camera_face_t) per face.
+    // Each face is copied field by field into a zeroed camera_face_t rather
+    // than reinterpreting the HIDL vector with the larger stride.
+    std::vector<camera_face_t> faces(metadata.faces.size());
+    for (size_t i = 0; i < faces.size(); i++) {
+        const hardware::camera::device::V1_0::CameraFace& in = metadata.faces[i];
+        camera_face_t& out = faces[i];
+        for (int k = 0; k < 4; k++) {
+            out.rect[k] = in.rect[k];
+        }
+        out.score = in.score;
+        out.id = in.id;
+        for (int k = 0; k < 2; k++) {
+            out.left_eye[k] = in.leftEye[k];
+            out.right_eye[k] = in.rightEye[k];
+            out.mouth[k] = in.mouth[k];
+        }
+    }
     camera_frame_metadata_t md;
-    md.number_of_faces = metadata.faces.size();
-    md.faces = (camera_face_t*) metadata.faces.data();
+    md.number_of_faces = faces.size();
+    md.faces = faces.data();
     sDataCb((int32_t) msgType, mem, bufferIndex, &md, this);
     return hardware::Void();
 }

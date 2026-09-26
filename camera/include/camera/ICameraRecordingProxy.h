@@ -69,13 +69,20 @@ class Parcel;
  *    (3) The app: ICamera.stopRecording().
  */
 
+class ICameraRecordingProxyListener;
+class IMemory;
+
 class ICameraRecordingProxy: public IInterface
 {
 public:
     DECLARE_META_INTERFACE(CameraRecordingProxy);
 
-    virtual status_t        startRecording() = 0;
+    virtual status_t        startRecording(const sp<ICameraRecordingProxyListener>& listener) = 0;
     virtual void            stopRecording() = 0;
+    virtual void            releaseRecordingFrame(const sp<IMemory>& mem) = 0;
+    virtual void            releaseRecordingFrameHandle(native_handle_t *handle) = 0;
+    virtual void            releaseRecordingFrameHandleBatch(
+                                    const std::vector<native_handle_t*>& handles) = 0;
 };
 
 // ----------------------------------------------------------------------------

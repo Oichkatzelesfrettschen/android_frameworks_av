@@ -686,8 +686,17 @@ status_t CameraSource::initWithCameraAccess(
     }
 
     // By default, store real data in video buffers.
+    // A legacy HAL1 device whose recording metadata carries a buffer handle
+    // valid only in the camera process sets ro.camera.record_force_yuv, so the
+    // out-of-process encoder never dereferences that pointer: skip the
+    // buffer-queue and metadata probes and ship raw YUV through shared memory.
     mVideoBufferMode = hardware::ICamera::VIDEO_BUFFER_MODE_DATA_CALLBACK_YUV;
-    if (OK == mCamera->setVideoBufferMode(hardware::ICamera::VIDEO_BUFFER_MODE_BUFFER_QUEUE)) {
+    bool forceYuv = property_get_bool("ro.camera.record_force_yuv", false);
+    if (forceYuv) {
+        ALOGI("%s: ro.camera.record_force_yuv set; forcing DATA_CALLBACK_YUV",
+                __FUNCTION__);
+    } else if (OK == mCamera->setVideoBufferMode(
+            hardware::ICamera::VIDEO_BUFFER_MODE_BUFFER_QUEUE)) {
         mVideoBufferMode = hardware::ICamera::VIDEO_BUFFER_MODE_BUFFER_QUEUE;
     } else if (OK == mCamera->setVideoBufferMode(
             hardware::ICamera::VIDEO_BUFFER_MODE_DATA_CALLBACK_METADATA)) {

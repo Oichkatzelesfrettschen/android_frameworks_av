@@ -1300,6 +1300,11 @@ void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
         ALOGI("REC-YUV size=%zu heapOff=%zd heapSz=%zu base=%p usp=%p topZero=%d rowbytes0=%02x%02x lastrow0=%02x",
               data->size(), off, sz, h != nullptr ? h->getBase() : nullptr, p, topZero, p[0], p[1],
               topBytes < data->size() ? p[topBytes] : 0);
+        size_t padOff = (size_t)mVideoSize.width * mVideoSize.height;
+        size_t chromaOff = (size_t)mVideoSize.width * 1088;
+        bool padZero = true;
+        for (size_t i = padOff; i < chromaOff && i < data->size(); ++i) { if (p[i]) { padZero = false; break; } }
+        ALOGI("REC-YUV-CHROMA padZero=%d firstChroma=%02x", padZero, chromaOff < data->size() ? p[chromaOff] : 0xff);
     }
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

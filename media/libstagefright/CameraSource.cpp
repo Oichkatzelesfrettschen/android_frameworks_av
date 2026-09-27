@@ -1124,6 +1124,14 @@ status_t CameraSource::read(
         //       (see declaration for details).
         //       Either document why it is safe in this case or address the
         //       issue (e.g. by copying).
+        if (frame->size() == sizeof(VideoNativeHandleMetadata)) {
+            VideoNativeHandleMetadata *m =
+                (VideoNativeHandleMetadata*)frame->unsecurePointer();
+            native_handle_t *h = m->pHandle;
+            ALOGI("REC-DIAG read: eType=%d pHandle=%p numFds=%d numInts=%d",
+                  m->eType, h, h ? h->numFds : -1, h ? h->numInts : -1);
+        }
+
         *buffer = new MediaBuffer(frame->unsecurePointer(), frame->size());
         (*buffer)->setObserver(this);
         (*buffer)->add_ref();
@@ -1278,6 +1286,14 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(data->unsecurePointer());
     metadata->eType = kMetadataBufferTypeNativeHandleSource;
     metadata->pHandle = handle;
+
+    ALOGI("REC-DIAG receipt: size=%zu sizeof(VNHM)=%zu numFds=%d numInts=%d "
+          "data0=%d data1=%d data2=%d",
+          data->size(), sizeof(VideoNativeHandleMetadata),
+          handle->numFds, handle->numInts,
+          handle->numFds > 0 ? handle->data[0] : -1,
+          handle->numFds + handle->numInts > 1 ? handle->data[handle->numFds] : -1,
+          handle->numFds + handle->numInts > 2 ? handle->data[handle->numFds + 1] : -1);
 
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

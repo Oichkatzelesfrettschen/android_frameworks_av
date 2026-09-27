@@ -753,6 +753,21 @@ status_t CameraSource::initWithCameraAccess(
     mMeta->setInt32(kKeyStride,      mVideoSize.width);
     mMeta->setInt32(kKeySliceHeight, mVideoSize.height);
     mMeta->setInt32(kKeyFrameRate,   mVideoFrameRate);
+
+    // Diagnostic only: the video format CameraSource negotiated with the
+    // camera and handed to the encoder, read back from mMeta rather than
+    // repeated from the locals above, so the log matches what actually
+    // reaches the encoder's input port.
+    {
+        const char *videoFrameFormat =
+            params.get(CameraParameters::KEY_VIDEO_FRAME_FORMAT);
+        int32_t stride = -1, sliceHeight = -1;
+        mMeta->findInt32(kKeyStride, &stride);
+        mMeta->findInt32(kKeySliceHeight, &sliceHeight);
+        ALOGI("REC-FMT videoFrameFormat=%s mColorFormat=%d kKeyStride=%d kKeySliceHeight=%d",
+              videoFrameFormat != nullptr ? videoFrameFormat : "(null)",
+              mColorFormat, stride, sliceHeight);
+    }
     return OK;
 }
 
@@ -1269,6 +1284,22 @@ void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
               "pHandle=0x%" PRIxPTR " mapped=%d %s",
               data->size(), sizeof(VideoNativeHandleMetadata), m->eType, handleAddr,
               mapped, mapped ? mapping : "(not mapped in this process)");
+    }
+    // Diagnostic only: settle whether the ~12-row dark band at the top of
+    // every recorded frame is already zero on the input side, before the
+    // encoder or muxer touch it. Rate-limited to the first 5 frames of each
+    // recording (mNumFramesReceived is per-instance and reset by a fresh
+    // CameraSource, so this fires for every session, not just the first).
+    if (mNumFramesReceived <= 5) {
+        ssize_t off; size_t sz;
+        sp<IMemoryHeap> h = data->getMemory(&off, &sz);
+        const uint8_t* p = (const uint8_t*)data->unsecurePointer();
+        size_t topBytes = (size_t)mVideoSize.width * 12;
+        bool topZero = true;
+        for (size_t i = 0; i < topBytes && i < data->size(); ++i) { if (p[i]) { topZero = false; break; } }
+        ALOGI("REC-YUV size=%zu heapOff=%zd heapSz=%zu base=%p usp=%p topZero=%d rowbytes0=%02x%02x lastrow0=%02x",
+              data->size(), off, sz, h != nullptr ? h->getBase() : nullptr, p, topZero, p[0], p[1],
+              topBytes < data->size() ? p[topBytes] : 0);
     }
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

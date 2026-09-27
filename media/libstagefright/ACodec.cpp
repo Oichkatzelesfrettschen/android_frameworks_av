@@ -4152,6 +4152,12 @@ status_t ACodec::setupVideoEncoder(
         video_def->eColorFormat = colorFormat;
     }
 
+    // Diagnostic only: the request CameraSource/MediaCodec composed for the
+    // venc's input port, before the component gets a chance to round it.
+    ALOGI("REC-VENC-REQ colorFormat=%d width=%d height=%d stride=%d sliceHeight=%d "
+          "nBufferSize=%u",
+          colorFormat, width, height, stride, sliceHeight, def.nBufferSize);
+
     err = mOMXNode->setParameter(
             OMX_IndexParamPortDefinition, &def, sizeof(def));
 
@@ -4160,6 +4166,24 @@ status_t ACodec::setupVideoEncoder(
               mComponentName.c_str());
 
         return err;
+    }
+
+    // Diagnostic only: read the input port definition back so the log shows
+    // what the venc actually accepted (a component is free to round nStride
+    // and nSliceHeight up to its own alignment), not just what was asked for.
+    {
+        OMX_PARAM_PORTDEFINITIONTYPE readback;
+        InitOMXParams(&readback);
+        readback.nPortIndex = kPortIndexInput;
+        status_t rbErr = mOMXNode->getParameter(
+                OMX_IndexParamPortDefinition, &readback, sizeof(readback));
+        if (rbErr == OK) {
+            ALOGI("REC-VENC-ACK colorFormat=%d nStride=%u nSliceHeight=%u nBufferSize=%u",
+                  readback.format.video.eColorFormat, readback.format.video.nStride,
+                  readback.format.video.nSliceHeight, readback.nBufferSize);
+        } else {
+            ALOGI("REC-VENC-ACK getParameter failed: %d", rbErr);
+        }
     }
 
     /* Output port configuration */

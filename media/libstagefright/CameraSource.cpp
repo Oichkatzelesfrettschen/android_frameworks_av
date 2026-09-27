@@ -15,6 +15,8 @@
  */
 
 #include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "CameraSource"
@@ -48,6 +50,39 @@
 namespace android {
 
 static const int64_t CAMERA_SOURCE_TIMEOUT_NS = 3000000000LL;
+
+// REC-PTR diagnostic only: reports whether addr falls inside any range this
+// process has mapped, without dereferencing it. A miss means the metadata's
+// pHandle field holds an address from a different process's address space
+// (or freed/unmapped memory); a hit reports the owning mapping's path so a
+// dangling-but-still-mapped handle (aliasing some unrelated library) is
+// distinguishable from one this process never mapped at all.
+static bool recPtrScanProcSelfMaps(uintptr_t addr, char *out, size_t out_size) {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (fp == nullptr) {
+        return false;
+    }
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), fp) != nullptr) {
+        unsigned long start = 0, end = 0;
+        if (sscanf(line, "%lx-%lx", &start, &end) == 2 &&
+                addr >= (uintptr_t)start && addr < (uintptr_t)end) {
+            found = true;
+            if (out != nullptr && out_size > 0) {
+                size_t len = strlen(line);
+                if (len > 0 && line[len - 1] == '\n') {
+                    line[len - 1] = '\0';
+                }
+                strncpy(out, line, out_size - 1);
+                out[out_size - 1] = '\0';
+            }
+            break;
+        }
+    }
+    fclose(fp);
+    return found;
+}
 
 struct CameraSourceListener : public CameraListener {
     explicit CameraSourceListener(const sp<CameraSource> &source);
@@ -1120,6 +1155,17 @@ status_t CameraSource::read(
         frameTime = *mFrameTimes.begin();
         mFrameTimes.erase(mFrameTimes.begin());
         mFramesBeingEncoded.push_back(frame);
+        if (frame->size() == sizeof(VideoNativeHandleMetadata)) {
+            VideoNativeHandleMetadata *m =
+                (VideoNativeHandleMetadata*)frame->unsecurePointer();
+            uintptr_t handleAddr = (uintptr_t)m->pHandle;
+            char mapping[256];
+            bool mapped = recPtrScanProcSelfMaps(handleAddr, mapping, sizeof(mapping));
+            ALOGI("REC-PTR read: size=%zu sizeof(VNHM)=%zu eType=%d "
+                  "pHandle=0x%" PRIxPTR " mapped=%d %s",
+                  frame->size(), sizeof(VideoNativeHandleMetadata), m->eType, handleAddr,
+                  mapped, mapped ? mapping : "(not mapped in this process)");
+        }
         // TODO: Using unsecurePointer() has some associated security pitfalls
         //       (see declaration for details).
         //       Either document why it is safe in this case or address the
@@ -1213,6 +1259,17 @@ void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
     ++mNumFramesReceived;
 
     CHECK(data != NULL && data->size() > 0);
+    if (data->size() == sizeof(VideoNativeHandleMetadata)) {
+        VideoNativeHandleMetadata *m =
+            (VideoNativeHandleMetadata*)data->unsecurePointer();
+        uintptr_t handleAddr = (uintptr_t)m->pHandle;
+        char mapping[256];
+        bool mapped = recPtrScanProcSelfMaps(handleAddr, mapping, sizeof(mapping));
+        ALOGI("REC-PTR dataCallbackTimestamp: size=%zu sizeof(VNHM)=%zu eType=%d "
+              "pHandle=0x%" PRIxPTR " mapped=%d %s",
+              data->size(), sizeof(VideoNativeHandleMetadata), m->eType, handleAddr,
+              mapped, mapped ? mapping : "(not mapped in this process)");
+    }
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
     mFrameTimes.push_back(timeUs);

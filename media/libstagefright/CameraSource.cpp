@@ -976,6 +976,7 @@ status_t CameraSource::reset() {
 
 void CameraSource::releaseRecordingFrame(const sp<IMemory>& frame) {
     ALOGV("releaseRecordingFrame");
+    ALOGI("REC-PTR releaseRecordingFrame: entry frame=%p", frame.get());
 
     if (mVideoBufferMode == hardware::ICamera::VIDEO_BUFFER_MODE_BUFFER_QUEUE) {
         // Return the buffer to buffer queue in VIDEO_BUFFER_MODE_BUFFER_QUEUE mode.
@@ -1027,10 +1028,14 @@ void CameraSource::releaseRecordingFrame(const sp<IMemory>& frame) {
                     mMetadataHandleCopies.removeItemsAt(idx);
                 }
             }
+            ALOGI("REC-PTR release: copy=%p original=%p", handle, original);
             if (original != nullptr) {
                 native_handle_close(handle);
                 native_handle_delete(handle);
                 handle = original;
+            } else {
+                ALOGW("REC-PTR release: no copy->original mapping for %p "
+                      "(already released, or never copied)", handle);
             }
 
             ssize_t offset;
@@ -1084,6 +1089,7 @@ void CameraSource::releaseRecordingFrame(const sp<IMemory>& frame) {
 }
 
 void CameraSource::releaseQueuedFrames() {
+    ALOGI("REC-PTR releaseQueuedFrames: entry, %zu frames queued", mFramesBeingEncoded.size());
     List<sp<IMemory> >::iterator it;
     while (!mFramesReceived.empty()) {
         it = mFramesReceived.begin();
@@ -1161,6 +1167,11 @@ status_t CameraSource::read(
         frameTime = *mFrameTimes.begin();
         mFrameTimes.erase(mFrameTimes.begin());
         mFramesBeingEncoded.push_back(frame);
+        if (frame->size() == sizeof(VideoNativeHandleMetadata)) {
+            VideoNativeHandleMetadata *m =
+                (VideoNativeHandleMetadata*)frame->unsecurePointer();
+            ALOGI("REC-PTR read: pHandle=%p", m->pHandle);
+        }
         // TODO: Using unsecurePointer() has some associated security pitfalls
         //       (see declaration for details).
         //       Either document why it is safe in this case or address the
@@ -1333,6 +1344,7 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
         Mutex::Autolock handleLock(mMetadataHandleLock);
         mMetadataHandleCopies.add(handleCopy, handle);
     }
+    ALOGI("REC-PTR receipt: original=%p copy=%p", handle, handleCopy);
 
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
@@ -1400,6 +1412,7 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             Mutex::Autolock handleLock(mMetadataHandleLock);
             mMetadataHandleCopies.add(handleCopy, handle);
         }
+        ALOGI("REC-PTR receipt (batch): original=%p copy=%p", handle, handleCopy);
 
         mFramesReceived.push_back(data);
         int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

@@ -164,14 +164,15 @@ sp<TCam> CameraBase<TCam, TCamTraits>::connect(int cameraId,
                                                int targetSdkVersion, int rotationOverride,
                                                bool forceSlowJpegMode,
                                                const AttributionSourceState& clientAttribution,
-                                               int32_t devicePolicy)
+                                               int32_t devicePolicy,
+                                               binder::Status* outStatus)
 {
     ALOGV("%s: connect", __FUNCTION__);
     sp<TCam> c = new TCam(cameraId);
     sp<TCamCallbacks> cl = c;
     const sp<::android::hardware::ICameraService> cs = getCameraService();
 
-    binder::Status ret;
+    binder::Status ret = binder::Status::fromStatusT(DEAD_OBJECT);
     if (cs != nullptr) {
         TCamConnectService fnConnectService = TCamTraits::fnConnectService;
         ALOGI("Connect camera (legacy API) - rotationOverride %d, forceSlowJpegMode %d",
@@ -187,6 +188,9 @@ sp<TCam> CameraBase<TCam, TCamTraits>::connect(int cameraId,
         ALOGW("An error occurred while connecting to camera %d: %s", cameraId,
                 (cs == nullptr) ? "Service not available" : ret.toString8().c_str());
         c.clear();
+    }
+    if (outStatus != nullptr) {
+        *outStatus = ret;
     }
     return c;
 }

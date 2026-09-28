@@ -90,6 +90,12 @@ public:
                                 int targetSdkVersion, int rotationOverride, bool forceSlowJpegMode,
                                 const AttributionSourceState& clientAttribution,
                                 int32_t devicePolicy = 0);
+            // outStatus receives the camera service's connect status, so a caller tells
+            // ERROR_CAMERA_IN_USE and ERROR_MAX_CAMERAS_IN_USE apart from a policy denial.
+    static  sp<Camera>  connect(int cameraId,
+                                int targetSdkVersion, int rotationOverride, bool forceSlowJpegMode,
+                                const AttributionSourceState& clientAttribution,
+                                int32_t devicePolicy, binder::Status* outStatus);
 
             virtual     ~Camera();
 

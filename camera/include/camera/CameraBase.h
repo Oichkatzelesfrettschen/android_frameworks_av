@@ -22,6 +22,7 @@
 
 #include <utils/Mutex.h>
 #include <binder/BinderService.h>
+#include <binder/Status.h>
 
 struct camera_frame_metadata;
 
@@ -127,7 +128,8 @@ public:
     static sp<TCam>      connect(int cameraId,
                                  int targetSdkVersion, int rotationOverride, bool forceSlowJpegMode,
                                  const AttributionSourceState &clientAttribution,
-                                 int32_t devicePolicy);
+                                 int32_t devicePolicy,
+                                 binder::Status* outStatus = nullptr);
     virtual void         disconnect();
 
     void                 setListener(const sp<TCamListener>& listener);

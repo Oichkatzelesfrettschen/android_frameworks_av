@@ -77,6 +77,14 @@ sp<Camera> Camera::connect(int cameraId, int targetSdkVersion, int rotationOverr
             forceSlowJpegMode, clientAttribution, devicePolicy);
 }
 
+sp<Camera> Camera::connect(int cameraId, int targetSdkVersion, int rotationOverride,
+        bool forceSlowJpegMode, const AttributionSourceState& clientAttribution,
+        int32_t devicePolicy, binder::Status* outStatus)
+{
+    return CameraBaseT::connect(cameraId, targetSdkVersion, rotationOverride,
+            forceSlowJpegMode, clientAttribution, devicePolicy, outStatus);
+}
+
 status_t Camera::reconnect()
 {
     ALOGV("reconnect");

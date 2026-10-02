@@ -15,6 +15,8 @@
  */
 
 #include <inttypes.h>
+#include <unistd.h>
+#include <cutils/native_handle.h>
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "CameraSource"
@@ -48,6 +50,28 @@
 namespace android {
 
 static const int64_t CAMERA_SOURCE_TIMEOUT_NS = 3000000000LL;
+
+// Deep-copy a recording native handle into a CameraSource-owned handle: dup each
+// fd (so the underlying dma-buf outlives the camera's reuse of the original) and
+// copy the ints verbatim. The legacy HAL1 provider recycles the original handle
+// before the pull thread reads it, so the metadata must carry this copy. Returns
+// nullptr if allocation fails; the caller then drops the frame.
+static native_handle_t* dupRecordingHandle(const native_handle_t* src) {
+    if (src == nullptr) {
+        return nullptr;
+    }
+    native_handle_t* dst = native_handle_create(src->numFds, src->numInts);
+    if (dst == nullptr) {
+        return nullptr;
+    }
+    for (int i = 0; i < src->numFds; ++i) {
+        dst->data[i] = (src->data[i] >= 0) ? dup(src->data[i]) : src->data[i];
+    }
+    for (int i = 0; i < src->numInts; ++i) {
+        dst->data[src->numFds + i] = src->data[src->numFds + i];
+    }
+    return dst;
+}
 
 struct CameraSourceListener : public CameraListener {
     explicit CameraSourceListener(const sp<CameraSource> &source);
@@ -1001,6 +1025,23 @@ void CameraSource::releaseRecordingFrame(const sp<IMemory>& frame) {
         }
 
         if (handle != nullptr) {
+            // The metadata carries a CameraSource-owned copy; swap it for the
+            // camera-owned original to hand back, and free the copy's dup'd fds.
+            native_handle_t* original = nullptr;
+            {
+                Mutex::Autolock handleLock(mMetadataHandleLock);
+                ssize_t idx = mMetadataHandleCopies.indexOfKey(handle);
+                if (idx >= 0) {
+                    original = mMetadataHandleCopies.valueAt(idx);
+                    mMetadataHandleCopies.removeItemsAt(idx);
+                }
+            }
+            if (original != nullptr) {
+                native_handle_close(handle);
+                native_handle_delete(handle);
+                handle = original;
+            }
+
             ssize_t offset;
             size_t size;
             sp<IMemoryHeap> heap = frame->getMemory(&offset, &size);
@@ -1283,10 +1324,24 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     sp<IMemory> data = *mMemoryBases.begin();
     mMemoryBases.erase(mMemoryBases.begin());
 
-    // Wrap native handle in sp<IMemory> so it can be pushed to mFramesReceived.
+    // Wrap a CameraSource-owned copy of the native handle in sp<IMemory> so it
+    // survives the HAL1 provider recycling the original before the pull thread
+    // reads it. The original is handed back to the camera at release.
+    native_handle_t* handleCopy = dupRecordingHandle(handle);
+    if (handleCopy == nullptr) {
+        ALOGE("Failed to copy recording native handle; dropping frame");
+        mMemoryBases.push_back(data);
+        --mNumFramesReceived;
+        releaseRecordingFrameHandle(handle);
+        return;
+    }
     VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(data->unsecurePointer());
     metadata->eType = kMetadataBufferTypeNativeHandleSource;
-    metadata->pHandle = handle;
+    metadata->pHandle = handleCopy;
+    {
+        Mutex::Autolock handleLock(mMetadataHandleLock);
+        mMetadataHandleCopies.add(handleCopy, handle);
+    }
 
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
@@ -1335,10 +1390,25 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         sp<IMemory> data = *mMemoryBases.begin();
         mMemoryBases.erase(mMemoryBases.begin());
 
-        // Wrap native handle in sp<IMemory> so it can be pushed to mFramesReceived.
+        // Wrap a CameraSource-owned copy of the native handle in sp<IMemory> so
+        // it survives the HAL1 provider recycling the original before the pull
+        // thread reads it. The original is handed back to the camera at release.
+        native_handle_t* handleCopy = dupRecordingHandle(handle);
+        if (handleCopy == nullptr) {
+            ALOGE("Failed to copy recording native handle; dropping batched frame");
+            mMemoryBases.push_back(data);
+            --batchSize;
+            --mNumFramesReceived;
+            releaseRecordingFrameHandle(handle);
+            continue;
+        }
         VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(data->unsecurePointer());
         metadata->eType = kMetadataBufferTypeNativeHandleSource;
-        metadata->pHandle = handle;
+        metadata->pHandle = handleCopy;
+        {
+            Mutex::Autolock handleLock(mMetadataHandleLock);
+            mMetadataHandleCopies.add(handleCopy, handle);
+        }
 
         mFramesReceived.push_back(data);
         int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

@@ -589,12 +589,14 @@ void CameraClient::releaseRecordingFrameHandleBatch(const std::vector<native_han
         }
     }
 
-    if (error) {
+    // After disconnect() clears mHardware no HAL takes the handles back, so
+    // this client closes and deletes them.
+    if (error || disconnected) {
         for (auto& handle : handles) {
             native_handle_close(handle);
             native_handle_delete(handle);
         }
-    } else if (!disconnected) {
+    } else {
         mHardware->releaseRecordingFrameBatch(frames);
     }
     return;

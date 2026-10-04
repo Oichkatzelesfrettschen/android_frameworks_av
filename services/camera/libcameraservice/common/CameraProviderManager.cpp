@@ -2247,9 +2247,14 @@ std::unique_ptr<CameraProviderManager::ProviderInfo::DeviceInfo>
         conflictName = id;
     }
 
-    return std::unique_ptr<DeviceInfo>(
+    std::unique_ptr<DeviceInfo> deviceInfo(
         new DeviceInfoT(name, tagId, id, minorVersion, resourceCost, this,
                 mProviderPublicCameraIds, cameraInterface));
+    if (!deviceInfo->isInitialized()) {
+        ALOGE("%s: Device %s failed to initialize", __FUNCTION__, name.c_str());
+        return nullptr;
+    }
+    return deviceInfo;
 }
 
 template<class InterfaceT>
@@ -2364,6 +2369,9 @@ CameraProviderManager::ProviderInfo::DeviceInfo1::DeviceInfo1(const std::string&
                 id.c_str(), CameraProviderManager::statusToString(status));
         return;
     }
+    // Every path past a successful open() closes the device; mDeviceInitialized
+    // stays false unless the parameters and CameraInfo were both read.
+    status_t res = OK;
     hardware::Return<void> ret;
     ret = interface->getParameters([this](const hardware::hidl_string& parms) {
                 mDefaultParameters.unflatten(String8(parms.c_str()));
@@ -2371,18 +2379,18 @@ CameraProviderManager::ProviderInfo::DeviceInfo1::DeviceInfo1(const std::string&
     if (!ret.isOk()) {
         ALOGE("%s: Transaction error reading camera device %s params to check for a flash unit: %s",
                 __FUNCTION__, id.c_str(), status.description().c_str());
-        return;
-    }
-    const char *flashMode =
-            mDefaultParameters.get(CameraParameters::KEY_SUPPORTED_FLASH_MODES);
-    if (flashMode && strstr(flashMode, CameraParameters::FLASH_MODE_TORCH)) {
-        mHasFlashUnit = true;
-    }
+        res = DEAD_OBJECT;
+    } else {
+        const char *flashMode =
+                mDefaultParameters.get(CameraParameters::KEY_SUPPORTED_FLASH_MODES);
+        if (flashMode && strstr(flashMode, CameraParameters::FLASH_MODE_TORCH)) {
+            mHasFlashUnit = true;
+        }
 
-    status_t res = cacheCameraInfo(interface);
-    if (res != OK) {
-        ALOGE("%s: Could not cache CameraInfo", __FUNCTION__);
-        return;
+        res = cacheCameraInfo(interface);
+        if (res != OK) {
+            ALOGE("%s: Could not cache CameraInfo", __FUNCTION__);
+        }
     }
 
     ret = interface->close();
@@ -2390,6 +2398,11 @@ CameraProviderManager::ProviderInfo::DeviceInfo1::DeviceInfo1(const std::string&
         ALOGE("%s: Transaction error closing camera device %s after check for a flash unit: %s",
                 __FUNCTION__, id.c_str(), status.description().c_str());
     }
+
+    if (res != OK) {
+        return;
+    }
+    mDeviceInitialized = true;
 
     if (!kEnableLazyHal) {
         // Save HAL reference indefinitely

@@ -481,8 +481,17 @@ status_t Camera::RecordingProxy::startRecording(const sp<ICameraRecordingProxyLi
 {
     ALOGV("RecordingProxy::startRecording");
     mCamera->setRecordingProxyListener(listener);
-    mCamera->reconnect();
-    return mCamera->startRecording();
+    status_t err = mCamera->reconnect();
+    if (err == OK) {
+        err = mCamera->startRecording();
+    }
+    if (err != OK) {
+        // A failed start leaves no proxy listener installed, so frame
+        // callbacks fall back to mListener instead of a source that never
+        // started recording.
+        mCamera->setRecordingProxyListener(nullptr);
+    }
+    return err;
 }
 
 void Camera::RecordingProxy::stopRecording()

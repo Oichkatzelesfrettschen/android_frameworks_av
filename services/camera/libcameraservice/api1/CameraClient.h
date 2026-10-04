@@ -166,7 +166,8 @@ private:
 
     // mAvailableCallbackBuffers stores sp<IMemory> that HAL uses to send VideoNativeHandleMetadata.
     // It will be used to send VideoNativeHandleMetadata back to HAL when camera receives the
-    // native handle from releaseRecordingFrameHandle.
+    // native handle from releaseRecordingFrameHandle. Buffers queue in delivery order and pair
+    // with returned handles first-in first-out, since the encoder returns frames in that order.
     Mutex                           mAvailableCallbackBuffersLock;
     std::vector<sp<IMemory>>        mAvailableCallbackBuffers;
 

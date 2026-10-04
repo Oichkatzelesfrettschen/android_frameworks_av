@@ -1297,14 +1297,19 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             continue;
         }
 
+        // releaseRecordingFrameHandle takes ownership of a dropped handle, so
+        // a timed-out frame moves straight to the next batch element.
+        bool dropped = false;
         while (mMemoryBases.empty()) {
             if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
                     TIMED_OUT) {
                 ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
                 releaseRecordingFrameHandle(handle);
-                continue;
+                dropped = true;
+                break;
             }
         }
+        if (dropped) continue;
         ++batchSize;
         ++mNumFramesReceived;
         sp<IMemory> data = *mMemoryBases.begin();

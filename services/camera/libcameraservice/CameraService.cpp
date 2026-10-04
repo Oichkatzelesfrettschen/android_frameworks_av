@@ -4267,9 +4267,10 @@ void CameraService::updateStatus(StatusInternal status, const String8& cameraId,
             supportsCameraApi(String16(cameraId), hardware::ICameraService::API_VERSION_2,
                     &supportsHAL3);
     if (!sRet.isOk()) {
+        // A device the provider already removed has no DeviceInfo; its status
+        // update still reaches non-vendor listeners with supportsHAL3 false.
         ALOGW("%s: Failed to determine if device supports HAL3 %s, supportsCameraApi call failed",
                 __FUNCTION__, cameraId.string());
-        return;
     }
 
     // Collect the logical cameras without holding mStatusLock in updateStatus

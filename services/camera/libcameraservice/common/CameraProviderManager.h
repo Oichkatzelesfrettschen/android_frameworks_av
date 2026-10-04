@@ -485,6 +485,9 @@ private:
             virtual status_t setTorchMode(bool enabled) = 0;
             virtual status_t getCameraInfo(hardware::CameraInfo *info) const = 0;
             virtual bool isAPI1Compatible() const = 0;
+            // False when construction left the device unusable; the provider
+            // then skips registering it.
+            virtual bool isInitialized() const { return true; }
             virtual status_t dumpState(int fd) = 0;
             virtual status_t getCameraCharacteristics(bool overrideForPerfClass,
                     CameraMetadata *characteristics) const {
@@ -559,6 +562,7 @@ private:
             virtual status_t getCameraInfo(hardware::CameraInfo *info) const override;
             //In case of Device1Info assume that we are always API1 compatible
             virtual bool isAPI1Compatible() const override { return true; }
+            virtual bool isInitialized() const override { return mDeviceInitialized; }
             virtual status_t dumpState(int fd) override;
             DeviceInfo1(const std::string& name, const metadata_vendor_id_t tagId,
                     const std::string &id, uint16_t minorVersion,
@@ -569,6 +573,7 @@ private:
             virtual ~DeviceInfo1();
         private:
             CameraParameters2 mDefaultParameters;
+            bool mDeviceInitialized = false;
             status_t cacheCameraInfo(sp<InterfaceT> interface);
         };
 

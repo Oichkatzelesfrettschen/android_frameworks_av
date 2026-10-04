@@ -1710,7 +1710,7 @@ Status CameraService::connectDevice(
     ret = connectHelper<hardware::camera2::ICameraDeviceCallbacks,CameraDeviceClient>(cameraCb, id,
             /*api1CameraId*/-1,
             CAMERA_HAL_API_VERSION_UNSPECIFIED, clientPackageNameAdj, clientFeatureId,
-            clientUid, USE_CALLING_PID, API_2, /*shimUpdateOnly*/ false, /*scoreOffset*/0,
+            clientUid, USE_CALLING_PID, API_2, /*shimUpdateOnly*/ false, oomScoreOffset,
             targetSdkVersion, /*out*/client);
 
     if(!ret.isOk()) {

@@ -523,8 +523,8 @@ void CameraClient::releaseRecordingFrameHandle(native_handle_t *handle) {
     {
         Mutex::Autolock l(mAvailableCallbackBuffersLock);
         if (!mAvailableCallbackBuffers.empty()) {
-            dataPtr = mAvailableCallbackBuffers.back();
-            mAvailableCallbackBuffers.pop_back();
+            dataPtr = mAvailableCallbackBuffers.front();
+            mAvailableCallbackBuffers.erase(mAvailableCallbackBuffers.begin());
         }
     }
 
@@ -564,8 +564,8 @@ void CameraClient::releaseRecordingFrameHandleBatch(const std::vector<native_han
         {
             Mutex::Autolock l(mAvailableCallbackBuffersLock);
             if (!mAvailableCallbackBuffers.empty()) {
-                dataPtr = mAvailableCallbackBuffers.back();
-                mAvailableCallbackBuffers.pop_back();
+                dataPtr = mAvailableCallbackBuffers.front();
+                mAvailableCallbackBuffers.erase(mAvailableCallbackBuffers.begin());
             }
         }
 

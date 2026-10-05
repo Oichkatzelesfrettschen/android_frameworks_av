@@ -948,6 +948,17 @@ Status CameraService::makeClient(const sp<CameraService>& cameraService,
         if (deviceVersion > CAMERA_DEVICE_API_VERSION_1_0 &&
             halVersion == CAMERA_DEVICE_API_VERSION_1_0) {
             // Only support higher HAL version device opened as HAL1.0 device.
+            // CameraClient opens the device through the provider's device@1.x
+            // interface, so the provider must list one for this ID beside the
+            // higher-version interface.
+            if (!cameraService->mCameraProviderManager->isValidDevice(cameraId.string(),
+                    /*majorVersion*/ 1)) {
+                ALOGE("Camera device \"%s\" (HAL version %x) has no HAL %x interface",
+                        cameraId.string(), deviceVersion, CAMERA_DEVICE_API_VERSION_1_0);
+                return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT,
+                        "Camera device \"%s\" (HAL version %d) cannot be opened as HAL version %d",
+                        cameraId.string(), deviceVersion, halVersion);
+            }
             sp<ICameraClient> tmp = static_cast<ICameraClient*>(cameraCb.get());
             *client = new CameraClient(cameraService, tmp, packageName, featureId,
                     api1CameraId, facing, sensorOrientation, clientPid, clientUid,

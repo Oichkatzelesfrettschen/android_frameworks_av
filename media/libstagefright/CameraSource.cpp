@@ -88,8 +88,11 @@ void CameraSourceListener::notify(int32_t msgType, int32_t ext1, int32_t ext2) {
 
 void CameraSourceListener::postData(int32_t msgType, const sp<IMemory> &dataPtr,
                                     camera_frame_metadata_t * /* metadata */) {
-    ALOGV("postData(%d, ptr:%p, size:%zu)",
-         msgType, dataPtr->unsecurePointer(), dataPtr->size());
+    // A metadata-only callback, such as preview face detection, carries no
+    // image memory, so dataPtr is null.
+    ALOGV("postData(%d, ptr:%p, size:%zu)", msgType,
+         dataPtr != nullptr ? dataPtr->unsecurePointer() : nullptr,
+         dataPtr != nullptr ? dataPtr->size() : 0);
 
     sp<CameraSource> source = mSource.promote();
     if (source.get() != NULL) {

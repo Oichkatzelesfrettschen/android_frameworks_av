@@ -114,6 +114,10 @@ void CameraSourceListener::postRecordingFrameHandleTimestamp(nsecs_t timestamp,
     sp<CameraSource> source = mSource.promote();
     if (source.get() != nullptr) {
         source->recordingFrameHandleCallbackTimestamp(timestamp/1000, handle);
+    } else {
+        // The listener owns a handle no source will return to the camera.
+        native_handle_close(handle);
+        native_handle_delete(handle);
     }
 }
 
@@ -128,6 +132,12 @@ void CameraSourceListener::postRecordingFrameHandleTimestampBatch(
             modifiedTimestamps[i] = timestamps[i] / 1000;
         }
         source->recordingFrameHandleCallbackTimestampBatch(modifiedTimestamps, handles);
+    } else {
+        // The listener owns handles no source will return to the camera.
+        for (native_handle_t* handle : handles) {
+            native_handle_close(handle);
+            native_handle_delete(handle);
+        }
     }
 }
 

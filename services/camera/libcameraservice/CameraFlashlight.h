@@ -145,6 +145,10 @@ class CameraHardwareInterfaceFlashControl : public FlashControlBase {
         // disconnect and free mDevice
         status_t disconnectCameraDevice();
 
+        // close an initialized device and drop its provider reference
+        void releaseDevice(const sp<CameraHardwareInterface>& device,
+                const String8& cameraId);
+
         // initialize the preview window
         status_t initializePreviewWindow(const sp<CameraHardwareInterface>& device,
                 int32_t width, int32_t height);

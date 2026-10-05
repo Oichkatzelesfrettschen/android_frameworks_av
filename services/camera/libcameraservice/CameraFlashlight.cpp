@@ -534,6 +534,7 @@ status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
     if (res) {
         ALOGE("%s: failed to get smallest surface size for camera %s",
                 __FUNCTION__, cameraId.string());
+        releaseDevice(device, cameraId);
         return res;
     }
 
@@ -541,6 +542,7 @@ status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
     if (res) {
         ALOGE("%s: failed to initialize preview window for camera %s",
                 __FUNCTION__, cameraId.string());
+        releaseDevice(device, cameraId);
         return res;
     }
 
@@ -569,10 +571,20 @@ status_t CameraHardwareInterfaceFlashControl::disconnectCameraDevice() {
                 __FUNCTION__, strerror(-res), res);
     }
     mDevice->setPreviewWindow(NULL);
-    mDevice->release();
+    releaseDevice(mDevice, mCameraId);
     mDevice = NULL;
 
     return OK;
+}
+
+// A successful CameraHardwareInterface::initialize() saves a DeviceMode::CAMERA
+// provider reference through openSession; with no BasicClient to drop it, the
+// flash control removes it once the device is closed.
+void CameraHardwareInterfaceFlashControl::releaseDevice(
+        const sp<CameraHardwareInterface>& device, const String8& cameraId) {
+    device->release();
+    mProviderManager->removeRef(CameraProviderManager::DeviceMode::CAMERA,
+            cameraId.string());
 }
 // CameraHardwareInterfaceFlashControl implementation ends
 

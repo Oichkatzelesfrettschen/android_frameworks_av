@@ -234,6 +234,13 @@ public:
     void releaseRecordingFrame(const sp<IMemory>& mem);
 
     /**
+     * Release a recording frame delivered as a native handle. mem is the
+     * service-owned callback buffer of that frame and names its heap slot;
+     * this call closes and deletes handle after the HAL takes it back.
+     */
+    void releaseRecordingFrameHandle(const sp<IMemory>& mem, native_handle_t* handle);
+
+    /**
      * Release a batch of recording frames previously returned by
      * CAMERA_MSG_VIDEO_FRAME. This method only supports frames that are
      * stored as VideoNativeHandleMetadata.

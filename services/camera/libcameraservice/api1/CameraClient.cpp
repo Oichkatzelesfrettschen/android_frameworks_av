@@ -573,7 +573,7 @@ void CameraClient::releaseRecordingFrameHandle(native_handle_t *handle) {
         VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(dataPtr->unsecurePointer());
         metadata->eType = kMetadataBufferTypeNativeHandleSource;
         metadata->pHandle = handle;
-        mHardware->releaseRecordingFrame(dataPtr);
+        mHardware->releaseRecordingFrameHandle(dataPtr, handle);
     } else {
         // After disconnect() clears mHardware no HAL takes the handle back, so
         // this client closes and deletes it.

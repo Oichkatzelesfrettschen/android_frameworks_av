@@ -374,6 +374,9 @@ status_t CameraHardwareInterfaceFlashControl::setTorchMode(
 
     res = startPreviewAndTorch();
     if (res) {
+        // hasFlashUnitLocked() left the device open for the torch; a failed
+        // start closes it so camera clients can open it.
+        disconnectCameraDevice();
         return res;
     }
 

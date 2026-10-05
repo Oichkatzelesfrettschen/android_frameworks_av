@@ -125,9 +125,9 @@ private:
         int64_t timeBetweenTimeLapseFrameCaptureUs,
         bool storeMetaDataInVideoBuffers = true);
 
-    // Wrapper over CameraSource::signalBufferReturned() to implement quick stop.
-    // It only handles the case when mLastReadBufferCopy is signalled. Otherwise
-    // it calls the base class' function.
+    // Wrapper over CameraSource::signalBufferReturned(). mLastReadBufferCopy
+    // returns through its own observer, so every buffer seen here belongs to
+    // the base class.
     virtual void signalBufferReturned(MediaBufferBase* buffer);
 
     // Wrapper over CameraSource::read() to implement quick stop.

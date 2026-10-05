@@ -34,6 +34,36 @@
 
 namespace android {
 
+namespace {
+
+// Observer of a quick-stop copy. The source keeps one reference to the copy
+// until its destructor, so the last release comes from that destructor or,
+// when the encoder still holds the copy then, from the encoder after the
+// source is gone. Either way this observer, not the source, closes the cloned
+// native handle, frees the buffer and deletes itself.
+class QuickStopCopyObserver : public MediaBufferObserver {
+public:
+    explicit QuickStopCopyObserver(bool ownsNativeHandle)
+        : mOwnsNativeHandle(ownsNativeHandle) {}
+
+    void signalBufferReturned(MediaBufferBase *buffer) override {
+        if (mOwnsNativeHandle) {
+            native_handle_t* handle =
+                    ((VideoNativeHandleMetadata*)(buffer->data()))->pHandle;
+            native_handle_close(handle);
+            native_handle_delete(handle);
+        }
+        buffer->setObserver(NULL);
+        buffer->release();
+        delete this;
+    }
+
+private:
+    const bool mOwnsNativeHandle;
+};
+
+}  // namespace
+
 // static
 CameraSourceTimeLapse *CameraSourceTimeLapse::CreateFromCamera(
         const sp<hardware::ICamera> &camera,
@@ -171,21 +201,8 @@ bool CameraSourceTimeLapse::trySettingVideoSize(
 
 void CameraSourceTimeLapse::signalBufferReturned(MediaBufferBase* buffer) {
     ALOGV("signalBufferReturned");
-    Mutex::Autolock autoLock(mQuickStopLock);
-    if (mQuickStop && (buffer == mLastReadBufferCopy)) {
-        if (metaDataStoredInVideoBuffers() == kMetadataBufferTypeNativeHandleSource) {
-            native_handle_t* handle = (
-                (VideoNativeHandleMetadata*)(mLastReadBufferCopy->data()))->pHandle;
-            native_handle_close(handle);
-            native_handle_delete(handle);
-        }
-        buffer->setObserver(NULL);
-        buffer->release();
-        mLastReadBufferCopy = NULL;
-        mForceRead = true;
-    } else {
-        return CameraSource::signalBufferReturned(buffer);
-    }
+    // The quick-stop copy returns through QuickStopCopyObserver.
+    return CameraSource::signalBufferReturned(buffer);
 }
 
 void createMediaBufferCopy(
@@ -217,7 +234,8 @@ void CameraSourceTimeLapse::fillLastReadBufferCopy(MediaBufferBase& sourceBuffer
     createMediaBufferCopy(sourceBuffer, frameTime, &mLastReadBufferCopy,
         metaDataStoredInVideoBuffers());
     mLastReadBufferCopy->add_ref();
-    mLastReadBufferCopy->setObserver(this);
+    mLastReadBufferCopy->setObserver(new QuickStopCopyObserver(
+            metaDataStoredInVideoBuffers() == kMetadataBufferTypeNativeHandleSource));
 }
 
 status_t CameraSourceTimeLapse::read(

@@ -749,6 +749,16 @@ Status CameraService::getCameraCharacteristics(const String16& cameraId,
     status_t res = mCameraProviderManager->getCameraCharacteristics(
             cameraIdStr, overrideForPerfClass, cameraInfo);
     if (res != OK) {
+        // A HAL1 device has no camera2 characteristics, so the provider reports
+        // NAME_NOT_FOUND for it as well; only an ID absent from every provider
+        // is an illegal argument.
+        hardware::hidl_version deviceVersion{0,0};
+        if (res == NAME_NOT_FOUND && mCameraProviderManager->getHighestSupportedVersion(
+                cameraIdStr, &deviceVersion) != OK) {
+            return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT, "Unable to retrieve camera "
+                    "characteristics for unknown device %s: %s (%d)", String8(cameraId).string(),
+                    strerror(-res), res);
+        }
         logServiceError(String8::format("Unable to retrieve camera characteristics for "
         "device %s.", String8(cameraId).string()),ERROR_INVALID_OPERATION);
         return STATUS_ERROR_FMT(ERROR_INVALID_OPERATION, "Unable to retrieve camera "
@@ -1636,8 +1646,9 @@ bool CameraService::shouldRejectSystemCameraConnection(const String8& cameraId) 
     int cUid = CameraThreadState::getCallingUid();
     SystemCameraKind systemCameraKind = SystemCameraKind::PUBLIC;
     if (getSystemCameraKind(cameraId, &systemCameraKind) != OK) {
-        ALOGE("%s: Invalid camera id %s, ", __FUNCTION__, cameraId.c_str());
-        return true;
+        // This isn't a known camera ID, so it's not a system camera
+        ALOGV("%s: Unknown camera id %s, ", __FUNCTION__, cameraId.c_str());
+        return false;
     }
 
     // (1) Cameraserver trying to connect, accept.

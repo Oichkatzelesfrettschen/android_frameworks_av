@@ -260,12 +260,7 @@ binder::Status CameraClient::disconnect() {
     // Turn off all messages.
     disableMsgType(CAMERA_MSG_ALL_MSGS);
     mHardware->stopPreview();
-    /*
-    sCameraService->updateProxyDeviceState(
-            hardware::CameraSessionStats::CAMERA_STATE_IDLE,
-            mCameraIdStr, mCameraFacing, mClientPackageName,
-            hardware::CameraSessionStats::CAMERA_API_LEVEL_1);
-    */
+    notifyIdle();
     mHardware->cancelPicture();
     // Release the hardware resources.
     mHardware->release();
@@ -413,25 +408,25 @@ status_t CameraClient::startPreviewMode() {
     LOG1("startPreviewMode");
     status_t result = NO_ERROR;
 
-    // if preview has been enabled, nothing needs to be done
-    if (mHardware->previewEnabled()) {
-        return NO_ERROR;
+    // if preview has been enabled, only the streaming state may need restoring
+    if (!mHardware->previewEnabled()) {
+        if (mPreviewWindow != 0) {
+            mHardware->setPreviewScalingMode(
+                NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
+            mHardware->setPreviewTransform(mOrientation);
+        }
+        mHardware->setPreviewWindow(mPreviewWindow);
+        result = mHardware->startPreview();
+        if (result != NO_ERROR) {
+            return result;
+        }
     }
 
-    if (mPreviewWindow != 0) {
-        mHardware->setPreviewScalingMode(
-            NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
-        mHardware->setPreviewTransform(mOrientation);
-    }
-    mHardware->setPreviewWindow(mPreviewWindow);
-    result = mHardware->startPreview();
-    if (result == NO_ERROR) {
-/*
-        sCameraService->updateProxyDeviceState(
-            hardware::CameraSessionStats::CAMERA_STATE_ACTIVE,
-            mCameraIdStr, mCameraFacing, mClientPackageName,
-            hardware::CameraSessionStats::CAMERA_API_LEVEL_1);
-*/
+    // Frames flow while preview runs, so OP_CAMERA is held as an active op
+    // until preview stops; a refused op stops preview again.
+    result = notifyActive();
+    if (result != NO_ERROR) {
+        mHardware->stopPreview();
     }
     return result;
 }
@@ -463,6 +458,37 @@ status_t CameraClient::startRecordingMode() {
     return result;
 }
 
+// OP_CAMERA becomes an active op and the session is logged active when
+// frames start flowing; BasicClient::startCameraOps only checks the op.
+status_t CameraClient::notifyActive() {
+    if (mDeviceActive) {
+        return OK;
+    }
+    status_t res = startCameraStreamingOps();
+    if (res != OK) {
+        ALOGE("%s: Camera %s: Error starting camera streaming ops: %d", __FUNCTION__,
+                mCameraIdStr.string(), res);
+        return res;
+    }
+    CameraServiceProxyWrapper::logActive(mCameraIdStr);
+    mDeviceActive = true;
+    return OK;
+}
+
+void CameraClient::notifyIdle() {
+    if (!mDeviceActive) {
+        return;
+    }
+    status_t res = finishCameraStreamingOps();
+    if (res != OK) {
+        ALOGE("%s: Camera %s: Error finishing streaming ops: %d", __FUNCTION__,
+                mCameraIdStr.string(), res);
+    }
+    CameraServiceProxyWrapper::logIdle(mCameraIdStr, /*requestCount*/ 0,
+            /*resultErrorCount*/ 0, /*deviceError*/ false, {});
+    mDeviceActive = false;
+}
+
 // stop preview mode
 void CameraClient::stopPreview() {
     LOG1("stopPreview (pid %d)", CameraThreadState::getCallingPid());
@@ -472,12 +498,7 @@ void CameraClient::stopPreview() {
 
     disableMsgType(CAMERA_MSG_PREVIEW_FRAME);
     mHardware->stopPreview();
-    /*
-    sCameraService->updateProxyDeviceState(
-        hardware::CameraSessionStats::CAMERA_STATE_IDLE,
-        mCameraIdStr, mCameraFacing, mClientPackageName,
-        hardware::CameraSessionStats::CAMERA_API_LEVEL_1);
-    */
+    notifyIdle();
     mPreviewBuffer.clear();
 }
 
@@ -964,6 +985,11 @@ void CameraClient::handleShutter(void) {
         sCameraService->playSound(CameraService::SOUND_SHUTTER);
     }
 
+    // Shutters only happen in response to takePicture, so mark device as
+    // idle now, until preview is restarted. This runs before the lock drops
+    // for the remote callback, which can return with the lock released.
+    notifyIdle();
+
     sp<hardware::ICameraClient> c = mRemoteCallback;
     if (c != 0) {
         mLock.unlock();
@@ -971,15 +997,6 @@ void CameraClient::handleShutter(void) {
         if (!lockIfMessageWanted(CAMERA_MSG_SHUTTER)) return;
     }
     disableMsgType(CAMERA_MSG_SHUTTER);
-
-    // Shutters only happen in response to takePicture, so mark device as
-    // idle now, until preview is restarted
-    /*
-    sCameraService->updateProxyDeviceState(
-        hardware::CameraSessionStats::CAMERA_STATE_IDLE,
-        mCameraIdStr, mCameraFacing, mClientPackageName,
-        hardware::CameraSessionStats::CAMERA_API_LEVEL_1);
-    */
 
     mLock.unlock();
 }

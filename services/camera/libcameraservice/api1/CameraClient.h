@@ -106,6 +106,11 @@ private:
     status_t                startPreviewMode();
     status_t                startRecordingMode();
 
+    // OP_CAMERA streaming state and session logging while preview runs;
+    // both are idempotent and called with mLock held.
+    status_t                notifyActive();
+    void                    notifyIdle();
+
     // internal function used by sendCommand to enable/disable shutter sound.
     status_t                enableShutterSound(bool enable);
 
@@ -150,6 +155,7 @@ private:
     int                             mOrientation;     // Current display orientation
     bool                            mPlayShutterSound;
     bool                            mLegacyMode; // camera2 api legacy mode?
+    bool                            mDeviceActive = false; // streaming ops started
 
     // Ensures atomicity among the public methods
     mutable Mutex                   mLock;

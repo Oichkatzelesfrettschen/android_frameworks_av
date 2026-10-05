@@ -576,35 +576,55 @@ int CameraHardwareInterface::recordingEnabled()
     return false;
 }
 
-void CameraHardwareInterface::releaseRecordingFrame(const sp<IMemory>& mem)
-{
-    ALOGV("%s(%s)", __FUNCTION__, mName.string());
+// The HAL names a recording frame by heap ID and slot index, so the memory
+// must be one whole, slot-aligned region inside its heap. BpMemory returns a
+// null heap for an empty or out-of-bounds region.
+static bool getRecordingFrameSlot(const sp<IMemory>& mem, uint32_t* heapId,
+        uint32_t* bufferIndex) {
     ssize_t offset;
     size_t size;
     sp<IMemoryHeap> heap = mem->getMemory(&offset, &size);
-    int heapId = heap->getHeapID();
-    int bufferIndex = offset / size;
-    if (CC_LIKELY(mHidlDevice != nullptr)) {
-        if (size == sizeof(VideoNativeHandleMetadata)) {
-            // TODO: Using unsecurePointer() has some associated security pitfalls
-            //       (see declaration for details).
-            //       Either document why it is safe in this case or address the
-            //       issue (e.g. by copying).
-            VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*) mem->unsecurePointer();
-            if (md->eType == kMetadataBufferTypeNativeHandleSource) {
-                // Caching the handle here because md->pHandle will be subject to HAL's edit
-                native_handle_t* nh = md->pHandle;
-                hidl_handle frame = nh;
-                mHidlDevice->releaseRecordingFrameHandle(heapId, bufferIndex, frame);
-                native_handle_close(nh);
-                native_handle_delete(nh);
-            } else {
-                mHidlDevice->releaseRecordingFrame(heapId, bufferIndex);
-            }
-        } else {
-            mHidlDevice->releaseRecordingFrame(heapId, bufferIndex);
-        }
+    if (heap == nullptr || size == 0 || offset < 0 ||
+            static_cast<size_t>(offset) % size != 0 ||
+            size > heap->getSize() ||
+            static_cast<size_t>(offset) > heap->getSize() - size) {
+        ALOGE("%s: invalid recording frame memory (offset %zd, size %zu)", __FUNCTION__,
+                offset, size);
+        return false;
     }
+    *heapId = heap->getHeapID();
+    *bufferIndex = static_cast<size_t>(offset) / size;
+    return true;
+}
+
+void CameraHardwareInterface::releaseRecordingFrame(const sp<IMemory>& mem)
+{
+    ALOGV("%s(%s)", __FUNCTION__, mName.string());
+    // The memory comes from the client, so only its slot position is used;
+    // native handle frames return through releaseRecordingFrameHandle.
+    uint32_t heapId;
+    uint32_t bufferIndex;
+    if (!getRecordingFrameSlot(mem, &heapId, &bufferIndex)) {
+        return;
+    }
+    if (CC_LIKELY(mHidlDevice != nullptr)) {
+        mHidlDevice->releaseRecordingFrame(heapId, bufferIndex);
+    }
+}
+
+void CameraHardwareInterface::releaseRecordingFrameHandle(const sp<IMemory>& mem,
+        native_handle_t* handle)
+{
+    ALOGV("%s(%s)", __FUNCTION__, mName.string());
+    uint32_t heapId;
+    uint32_t bufferIndex;
+    if (getRecordingFrameSlot(mem, &heapId, &bufferIndex) &&
+            CC_LIKELY(mHidlDevice != nullptr)) {
+        hidl_handle frame = handle;
+        mHidlDevice->releaseRecordingFrameHandle(heapId, bufferIndex, frame);
+    }
+    native_handle_close(handle);
+    native_handle_delete(handle);
 }
 
 void CameraHardwareInterface::releaseRecordingFrameBatch(const std::vector<sp<IMemory>>& frames)

@@ -149,6 +149,15 @@ status_t BnCameraRecordingProxy::onTransact(
                 ALOGE("%s: Failed to read batch size: %s (%d)", __FUNCTION__, strerror(-res), res);
                 return BAD_VALUE;
             }
+            // Each native handle's numFds and numInts header alone takes two
+            // int32s, so a size the remaining parcel data cannot hold is
+            // rejected before reserving.
+            const size_t kMinEntryBytes = 2 * sizeof(int32_t);
+            if (n > data.dataAvail() / kMinEntryBytes) {
+                ALOGE("%s: Batch size %u exceeds the parcel's %zu remaining bytes", __FUNCTION__,
+                        n, data.dataAvail());
+                return BAD_VALUE;
+            }
             std::vector<native_handle_t*> handles;
             handles.reserve(n);
             for (uint32_t i = 0; i < n; i++) {
@@ -156,6 +165,10 @@ status_t BnCameraRecordingProxy::onTransact(
                 if (handle == nullptr) {
                     ALOGE("%s: Received a null native handle at handles[%d]",
                             __FUNCTION__, i);
+                    for (native_handle_t* h : handles) {
+                        native_handle_close(h);
+                        native_handle_delete(h);
+                    }
                     return BAD_VALUE;
                 }
                 handles.push_back(handle);

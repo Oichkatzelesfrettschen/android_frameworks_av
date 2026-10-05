@@ -251,8 +251,14 @@ binder::Status CameraClient::disconnect() {
     }
 
     // Make sure disconnect() is done once and once only, whether it is called
-    // from the user directly, or called by the destructor.
-    if (mHardware == 0) return res;
+    // from the user directly, or called by the destructor. A client whose
+    // HAL open failed in initialize() has no hardware but still holds the
+    // state startCameraOps() set up, which the idempotent base disconnect
+    // releases.
+    if (mHardware == 0) {
+        CameraService::Client::disconnect();
+        return res;
+    }
 
     LOG1("hardware teardown");
     // Before destroying mHardware, we must make sure it's in the

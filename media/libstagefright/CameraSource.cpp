@@ -1308,24 +1308,34 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     Mutex::Autolock autoLock(mLock);
     if (handle == nullptr) return;
 
-    // Acquire a memory base before timing state changes so a failed copy can
-    // restore the state from the immediately preceding accepted frame.
-    while (mMemoryBases.empty()) {
-        if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
-                TIMED_OUT) {
-            ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
-            releaseRecordingFrameHandle(handle);
-            return;
-        }
-    }
-
+    // Timing state is snapshotted before the skip decision so that every
+    // drop after this point, whether from a wait timeout or a failed copy,
+    // restores the state of the preceding accepted frame.
     const int64_t previousStartTimeUs = mStartTimeUs;
     const int64_t previousFirstFrameTimeUs = mFirstFrameTimeUs;
     const int64_t previousLastFrameTimestampUs = mLastFrameTimestampUs;
     const int32_t previousNumGlitches = mNumGlitches;
+    auto restoreTiming = [&] {
+        mStartTimeUs = previousStartTimeUs;
+        mFirstFrameTimeUs = previousFirstFrameTimeUs;
+        mLastFrameTimestampUs = previousLastFrameTimestampUs;
+        mNumGlitches = previousNumGlitches;
+    };
     if (shouldSkipFrameLocked(timestampUs)) {
         releaseRecordingFrameHandle(handle);
         return;
+    }
+
+    // A frame that the skip check accepts waits for a memory base; a frame that
+    // the check rejects never reaches this wait.
+    while (mMemoryBases.empty()) {
+        if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
+                TIMED_OUT) {
+            ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
+            restoreTiming();
+            releaseRecordingFrameHandle(handle);
+            return;
+        }
     }
 
     ++mNumFramesReceived;
@@ -1340,11 +1350,9 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     if (handleCopy == nullptr) {
         ALOGE("Failed to copy recording native handle; dropping frame");
         mMemoryBases.push_back(data);
+        mMemoryBaseAvailableCond.signal();
         --mNumFramesReceived;
-        mStartTimeUs = previousStartTimeUs;
-        mFirstFrameTimeUs = previousFirstFrameTimeUs;
-        mLastFrameTimestampUs = previousLastFrameTimestampUs;
-        mNumGlitches = previousNumGlitches;
+        restoreTiming();
         releaseRecordingFrameHandle(handle);
         return;
     }
@@ -1359,11 +1367,9 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
         native_handle_close(handleCopy);
         native_handle_delete(handleCopy);
         mMemoryBases.push_back(data);
+        mMemoryBaseAvailableCond.signal();
         --mNumFramesReceived;
-        mStartTimeUs = previousStartTimeUs;
-        mFirstFrameTimeUs = previousFirstFrameTimeUs;
-        mLastFrameTimestampUs = previousLastFrameTimestampUs;
-        mNumGlitches = previousNumGlitches;
+        restoreTiming();
         releaseRecordingFrameHandle(handle);
         return;
     }
@@ -1395,28 +1401,34 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         ALOGV("%s: timestamp %lld us", __FUNCTION__, (long long)timestampUs);
         if (handle == nullptr) continue;
 
-        // Acquire a memory base before timing state changes so a failed copy
-        // can restore the state from the immediately preceding accepted frame.
+        // Snapshot before the skip decision; see the single-frame callback.
+        const int64_t previousStartTimeUs = mStartTimeUs;
+        const int64_t previousFirstFrameTimeUs = mFirstFrameTimeUs;
+        const int64_t previousLastFrameTimestampUs = mLastFrameTimestampUs;
+        const int32_t previousNumGlitches = mNumGlitches;
+        auto restoreTiming = [&] {
+            mStartTimeUs = previousStartTimeUs;
+            mFirstFrameTimeUs = previousFirstFrameTimeUs;
+            mLastFrameTimestampUs = previousLastFrameTimestampUs;
+            mNumGlitches = previousNumGlitches;
+        };
+        if (shouldSkipFrameLocked(timestampUs)) {
+            releaseRecordingFrameHandle(handle);
+            continue;
+        }
+
         bool dropped = false;
         while (mMemoryBases.empty()) {
             if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
                     TIMED_OUT) {
                 ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
+                restoreTiming();
                 releaseRecordingFrameHandle(handle);
                 dropped = true;
                 break;
             }
         }
         if (dropped) continue;
-
-        const int64_t previousStartTimeUs = mStartTimeUs;
-        const int64_t previousFirstFrameTimeUs = mFirstFrameTimeUs;
-        const int64_t previousLastFrameTimestampUs = mLastFrameTimestampUs;
-        const int32_t previousNumGlitches = mNumGlitches;
-        if (shouldSkipFrameLocked(timestampUs)) {
-            releaseRecordingFrameHandle(handle);
-            continue;
-        }
 
         ++batchSize;
         ++mNumFramesReceived;
@@ -1430,12 +1442,10 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         if (handleCopy == nullptr) {
             ALOGE("Failed to copy recording native handle; dropping batched frame");
             mMemoryBases.push_back(data);
+            mMemoryBaseAvailableCond.signal();
             --batchSize;
             --mNumFramesReceived;
-            mStartTimeUs = previousStartTimeUs;
-            mFirstFrameTimeUs = previousFirstFrameTimeUs;
-            mLastFrameTimestampUs = previousLastFrameTimestampUs;
-            mNumGlitches = previousNumGlitches;
+            restoreTiming();
             releaseRecordingFrameHandle(handle);
             continue;
         }
@@ -1450,12 +1460,10 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             native_handle_close(handleCopy);
             native_handle_delete(handleCopy);
             mMemoryBases.push_back(data);
+            mMemoryBaseAvailableCond.signal();
             --batchSize;
             --mNumFramesReceived;
-            mStartTimeUs = previousStartTimeUs;
-            mFirstFrameTimeUs = previousFirstFrameTimeUs;
-            mLastFrameTimestampUs = previousLastFrameTimestampUs;
-            mNumGlitches = previousNumGlitches;
+            restoreTiming();
             releaseRecordingFrameHandle(handle);
             continue;
         }

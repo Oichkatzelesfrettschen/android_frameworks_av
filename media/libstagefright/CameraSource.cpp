@@ -65,7 +65,19 @@ static native_handle_t* dupRecordingHandle(const native_handle_t* src) {
         return nullptr;
     }
     for (int i = 0; i < src->numFds; ++i) {
-        dst->data[i] = (src->data[i] >= 0) ? dup(src->data[i]) : src->data[i];
+        dst->data[i] = -1;
+    }
+    for (int i = 0; i < src->numFds; ++i) {
+        if (src->data[i] < 0) {
+            dst->data[i] = src->data[i];
+            continue;
+        }
+        dst->data[i] = dup(src->data[i]);
+        if (dst->data[i] < 0) {
+            native_handle_close(dst);
+            native_handle_delete(dst);
+            return nullptr;
+        }
     }
     for (int i = 0; i < src->numInts; ++i) {
         dst->data[src->numFds + i] = src->data[src->numFds + i];
@@ -1296,11 +1308,8 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     Mutex::Autolock autoLock(mLock);
     if (handle == nullptr) return;
 
-    if (shouldSkipFrameLocked(timestampUs)) {
-        releaseRecordingFrameHandle(handle);
-        return;
-    }
-
+    // Acquire a memory base before timing state changes so a failed copy can
+    // restore the state from the immediately preceding accepted frame.
     while (mMemoryBases.empty()) {
         if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
                 TIMED_OUT) {
@@ -1308,6 +1317,15 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
             releaseRecordingFrameHandle(handle);
             return;
         }
+    }
+
+    const int64_t previousStartTimeUs = mStartTimeUs;
+    const int64_t previousFirstFrameTimeUs = mFirstFrameTimeUs;
+    const int64_t previousLastFrameTimestampUs = mLastFrameTimestampUs;
+    const int32_t previousNumGlitches = mNumGlitches;
+    if (shouldSkipFrameLocked(timestampUs)) {
+        releaseRecordingFrameHandle(handle);
+        return;
     }
 
     ++mNumFramesReceived;
@@ -1323,16 +1341,34 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
         ALOGE("Failed to copy recording native handle; dropping frame");
         mMemoryBases.push_back(data);
         --mNumFramesReceived;
+        mStartTimeUs = previousStartTimeUs;
+        mFirstFrameTimeUs = previousFirstFrameTimeUs;
+        mLastFrameTimestampUs = previousLastFrameTimestampUs;
+        mNumGlitches = previousNumGlitches;
         releaseRecordingFrameHandle(handle);
         return;
     }
     VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(data->unsecurePointer());
-    metadata->eType = kMetadataBufferTypeNativeHandleSource;
-    metadata->pHandle = handleCopy;
+    status_t mappingStatus;
     {
         Mutex::Autolock handleLock(mMetadataHandleLock);
-        mMetadataHandleCopies.add(handleCopy, handle);
+        mappingStatus = mMetadataHandleCopies.add(handleCopy, handle);
     }
+    if (mappingStatus < 0) {
+        ALOGE("Failed to track recording native handle copy; dropping frame");
+        native_handle_close(handleCopy);
+        native_handle_delete(handleCopy);
+        mMemoryBases.push_back(data);
+        --mNumFramesReceived;
+        mStartTimeUs = previousStartTimeUs;
+        mFirstFrameTimeUs = previousFirstFrameTimeUs;
+        mLastFrameTimestampUs = previousLastFrameTimestampUs;
+        mNumGlitches = previousNumGlitches;
+        releaseRecordingFrameHandle(handle);
+        return;
+    }
+    metadata->eType = kMetadataBufferTypeNativeHandleSource;
+    metadata->pHandle = handleCopy;
 
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
@@ -1359,11 +1395,8 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         ALOGV("%s: timestamp %lld us", __FUNCTION__, (long long)timestampUs);
         if (handle == nullptr) continue;
 
-        if (shouldSkipFrameLocked(timestampUs)) {
-            releaseRecordingFrameHandle(handle);
-            continue;
-        }
-
+        // Acquire a memory base before timing state changes so a failed copy
+        // can restore the state from the immediately preceding accepted frame.
         bool dropped = false;
         while (mMemoryBases.empty()) {
             if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
@@ -1375,6 +1408,15 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             }
         }
         if (dropped) continue;
+
+        const int64_t previousStartTimeUs = mStartTimeUs;
+        const int64_t previousFirstFrameTimeUs = mFirstFrameTimeUs;
+        const int64_t previousLastFrameTimestampUs = mLastFrameTimestampUs;
+        const int32_t previousNumGlitches = mNumGlitches;
+        if (shouldSkipFrameLocked(timestampUs)) {
+            releaseRecordingFrameHandle(handle);
+            continue;
+        }
 
         ++batchSize;
         ++mNumFramesReceived;
@@ -1390,16 +1432,35 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             mMemoryBases.push_back(data);
             --batchSize;
             --mNumFramesReceived;
+            mStartTimeUs = previousStartTimeUs;
+            mFirstFrameTimeUs = previousFirstFrameTimeUs;
+            mLastFrameTimestampUs = previousLastFrameTimestampUs;
+            mNumGlitches = previousNumGlitches;
             releaseRecordingFrameHandle(handle);
             continue;
         }
         VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(data->unsecurePointer());
-        metadata->eType = kMetadataBufferTypeNativeHandleSource;
-        metadata->pHandle = handleCopy;
+        status_t mappingStatus;
         {
             Mutex::Autolock handleLock(mMetadataHandleLock);
-            mMetadataHandleCopies.add(handleCopy, handle);
+            mappingStatus = mMetadataHandleCopies.add(handleCopy, handle);
         }
+        if (mappingStatus < 0) {
+            ALOGE("Failed to track batched recording native handle copy; dropping frame");
+            native_handle_close(handleCopy);
+            native_handle_delete(handleCopy);
+            mMemoryBases.push_back(data);
+            --batchSize;
+            --mNumFramesReceived;
+            mStartTimeUs = previousStartTimeUs;
+            mFirstFrameTimeUs = previousFirstFrameTimeUs;
+            mLastFrameTimestampUs = previousLastFrameTimestampUs;
+            mNumGlitches = previousNumGlitches;
+            releaseRecordingFrameHandle(handle);
+            continue;
+        }
+        metadata->eType = kMetadataBufferTypeNativeHandleSource;
+        metadata->pHandle = handleCopy;
 
         mFramesReceived.push_back(data);
         int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);

@@ -272,6 +272,14 @@ private:
     KeyedVector<ANativeWindowBuffer*, BufferItem> mReceivedBufferItemMap;
     sp<BufferQueueListener> mBufferQueueListener;
 
+    // Maps a CameraSource-owned metadata handle copy (the handle read() and the
+    // encoder marshal) to the camera-owned original handed back to the HAL at
+    // release. The legacy HAL1 provider recycles or closes the original before
+    // the pull thread reads it, so the metadata carries a copy that outlives
+    // that reuse. Protected by mMetadataHandleLock.
+    Mutex mMetadataHandleLock;
+    KeyedVector<native_handle_t*, native_handle_t*> mMetadataHandleCopies;
+
     Mutex mBatchLock; // protecting access to mInflightXXXXX members below
     // Start of members protected by mBatchLock
     std::deque<uint32_t> mInflightBatchSizes;

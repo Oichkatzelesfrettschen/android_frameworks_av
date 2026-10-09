@@ -259,6 +259,12 @@ bool ParseWaveFormatEx(const sp<ABuffer> &csd, WaveFormatEx *wfx) {
     wfx->channels = ReadLe16(p + 2);
     wfx->sampleRate = ReadLe32(p + 4);
     wfx->avgBytesPerSec = ReadLe32(p + 8);
+    // nBitRate in the OMX WMA parameter structures is an OMX_U32 holding
+    // nAvgBytesPerSec * 8, so a byte rate above UINT32_MAX / 8 has no
+    // representation there.
+    if (wfx->avgBytesPerSec > UINT32_MAX / 8) {
+        return false;
+    }
     wfx->blockAlign = ReadLe16(p + 12);
     wfx->bitsPerSample = ReadLe16(p + 14);
     size_t cbSize = ReadLe16(p + 16);

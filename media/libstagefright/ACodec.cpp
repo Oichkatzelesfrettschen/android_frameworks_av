@@ -3552,6 +3552,13 @@ static const struct VideoCodingMapEntry {
     { MEDIA_MIMETYPE_VIDEO_DOLBY_VISION, OMX_VIDEO_CodingDolbyVision },
     { MEDIA_MIMETYPE_IMAGE_ANDROID_HEIC, OMX_VIDEO_CodingImageHEIC },
     { MEDIA_MIMETYPE_VIDEO_AV1, OMX_VIDEO_CodingAV1 },
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+    // SMPTE 421M simple and main profile (WMV3, STRUCT_C codec data) and
+    // advanced profile (WVC1, start-code sequence header); the omx_vdec vc1
+    // and wmv kinds both report OMX_VIDEO_CodingWMV on their input port.
+    { "video/x-ms-wmv", OMX_VIDEO_CodingWMV },
+    { "video/wvc1", OMX_VIDEO_CodingWMV },
+#endif
 };
 
 static status_t GetVideoCodingTypeFromMime(

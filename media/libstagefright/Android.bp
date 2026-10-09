@@ -227,6 +227,8 @@ cc_library_shared {
 cc_library {
     name: "libstagefright",
 
+    defaults: ["stagefright_omx_legacy_qcom_codecs_defaults"],
+
     srcs: [
         "AACWriter.cpp",
         "ACodec.cpp",

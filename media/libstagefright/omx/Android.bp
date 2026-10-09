@@ -17,10 +17,23 @@ license {
     ],
 }
 
+// Products that ship the Qualcomm WMA, AMR-WB+ and VC-1 OMX components set
+// $(call soong_config_set,stagefright,omx_legacy_qcom_codecs,true) in their
+// board config. The define adds the MIME-to-role rows to GetComponentRole,
+// the role alias in SetComponentRole and the ACodec configuration paths.
+cc_defaults {
+    name: "stagefright_omx_legacy_qcom_codecs_defaults",
+    cflags: select(soong_config_variable("stagefright", "omx_legacy_qcom_codecs"), {
+        "true": ["-DSTAGEFRIGHT_OMX_LEGACY_QCOM_CODECS"],
+        default: [],
+    }),
+}
+
 cc_library_shared {
     name: "libstagefright_omx",
     vendor_available: true,
     double_loadable: true,
+    defaults: ["stagefright_omx_legacy_qcom_codecs_defaults"],
 
     srcs: [
         "OMXStore.cpp",
@@ -216,6 +229,7 @@ cc_library_shared {
     name: "libstagefright_omx_utils",
     vendor_available: true,
     double_loadable: true,
+    defaults: ["stagefright_omx_legacy_qcom_codecs_defaults"],
     srcs: ["OMXUtils.cpp"],
     export_include_dirs: [
         "include",

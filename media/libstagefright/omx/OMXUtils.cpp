@@ -178,6 +178,26 @@ const char *GetComponentRole(bool isEncoder, const char *mime) {
             "image_decoder.heic", "image_encoder.heic" },
         { MEDIA_MIMETYPE_IMAGE_AVIF,
             "image_decoder.avif", "image_encoder.avif" },
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+        // Qualcomm OMX decoders behind the msm_vidc VC-1 formats and the
+        // qdsp6v2 /dev/msm_wma, /dev/msm_wmapro and /dev/msm_amrwbplus nodes.
+        // MediaCodecsXmlParser keys its role map by role name and accepts one
+        // MIME type per role, so each MIME type carries its own role name;
+        // SetComponentRole translates the WVC1, WMA Pro and WMA Lossless names
+        // to the role strings the components enumerate.
+        { "video/x-ms-wmv",
+            "video_decoder.vc1", NULL },
+        { "video/wvc1",
+            "video_decoder.wvc1", NULL },
+        { "audio/x-ms-wma",
+            "audio_decoder.wma", NULL },
+        { "audio/x-ms-wma-pro",
+            "audio_decoder.wma10pro", NULL },
+        { "audio/x-ms-wma-lossless",
+            "audio_decoder.wmalossless", NULL },
+        { "audio/amr-wb-plus",
+            "audio_decoder.amrwbplus", NULL },
+#endif
     };
 
     static const size_t kNumMimeToRole =
@@ -198,7 +218,42 @@ const char *GetComponentRole(bool isEncoder, const char *mime) {
                   : kMimeToRole[i].decoderRole;
 }
 
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+namespace {
+
+// Role names GetComponentRole gives the Qualcomm codecs, mapped to the role
+// strings the components accept in OMX_IndexParamStandardComponentRole:
+// omx_vdec takes only "video_decoder.vc1" for its vc1 and wmv kinds, and
+// libOmxWmaDec enumerates "audio_decoder.wma" for all three WMA components.
+// ACodec::queryCapabilities and ACodec::setComponentRole both set the role
+// through SetComponentRole.
+struct QcomRoleAlias {
+    const char *listed;
+    const char *component;
+};
+
+constexpr QcomRoleAlias kQcomRoleAliases[] = {
+    { "video_decoder.wvc1", "video_decoder.vc1" },
+    { "audio_decoder.wma10pro", "audio_decoder.wma" },
+    { "audio_decoder.wmalossless", "audio_decoder.wma" },
+};
+
+const char *QcomComponentRole(const char *role) {
+    for (const QcomRoleAlias &alias : kQcomRoleAliases) {
+        if (!strcmp(role, alias.listed)) {
+            return alias.component;
+        }
+    }
+    return role;
+}
+
+}  // namespace
+#endif  // STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+
 status_t SetComponentRole(const sp<IOMXNode> &omxNode, const char *role) {
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+    role = QcomComponentRole(role);
+#endif
     OMX_PARAM_COMPONENTROLETYPE roleParams;
     InitOMXParams(&roleParams);
 

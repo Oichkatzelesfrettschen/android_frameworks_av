@@ -5652,6 +5652,16 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                         videoDef->eCompressionFormat, &mime) != OK) {
                         notify->setString("mime", "application/octet-stream");
                     } else {
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+                        // video/x-ms-wmv and video/wvc1 share OMX_VIDEO_CodingWMV,
+                        // so the configured type names the stream.
+                        AString configured;
+                        if (videoDef->eCompressionFormat == OMX_VIDEO_CodingWMV
+                                && mConfigFormat != nullptr
+                                && mConfigFormat->findString("mime", &configured)) {
+                            mime = configured;
+                        }
+#endif
                         notify->setString("mime", mime.c_str());
                     }
                     uint32_t intraRefreshPeriod = 0;

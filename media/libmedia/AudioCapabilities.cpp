@@ -39,10 +39,15 @@ const std::vector<Range<int32_t>>&
     return mSampleRateRanges;
 }
 
+// A media_codecs.xml row for a media type applyLevelLimits does not know, with
+// no channel-count limit, intersects {0..0} with the platform range and leaves
+// mInputChannelRanges empty. The scans iterate the ranges directly, so an
+// empty list yields 0 and MAX_INPUT_CHANNEL_COUNT instead of computing
+// size() - 1, which the unsigned-integer-overflow sanitizer traps on.
 int32_t AudioCapabilities::getMaxInputChannelCount() const {
     int32_t overallMax = 0;
-    for (int i = mInputChannelRanges.size() - 1; i >= 0; i--) {
-        int32_t lmax = mInputChannelRanges[i].upper();
+    for (const Range<int32_t> &range : mInputChannelRanges) {
+        int32_t lmax = range.upper();
         if (lmax > overallMax) {
             overallMax = lmax;
         }
@@ -52,8 +57,8 @@ int32_t AudioCapabilities::getMaxInputChannelCount() const {
 
 int32_t AudioCapabilities::getMinInputChannelCount() const {
     int32_t overallMin = MAX_INPUT_CHANNEL_COUNT;
-    for (int i = mInputChannelRanges.size() - 1; i >= 0; i--) {
-        int32_t lmin = mInputChannelRanges[i].lower();
+    for (const Range<int32_t> &range : mInputChannelRanges) {
+        int32_t lmin = range.lower();
         if (lmin < overallMin) {
             overallMin = lmin;
         }

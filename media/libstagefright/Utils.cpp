@@ -2376,6 +2376,11 @@ static const struct mime_conv_t mimeLookup[] = {
     { MEDIA_MIMETYPE_AUDIO_AC4,         AUDIO_FORMAT_AC4},
     { MEDIA_MIMETYPE_AUDIO_FLAC,        AUDIO_FORMAT_FLAC},
     { MEDIA_MIMETYPE_AUDIO_ALAC,        AUDIO_FORMAT_ALAC },
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+    // Android 15 has no Layer II decoder; the msm8226 aDSP decodes Layer II
+    // streams through compress offload.
+    { MEDIA_MIMETYPE_AUDIO_MPEG_LAYER_II, AUDIO_FORMAT_MP2 },
+#endif
     { 0, AUDIO_FORMAT_INVALID }
 };
 

@@ -189,6 +189,236 @@ static sp<DataConverter> getCopyConverter() {
     return sCopyConverter;
 }
 
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+namespace {
+
+constexpr const char *kQcomMimeWma = "audio/x-ms-wma";
+constexpr const char *kQcomMimeWmaPro = "audio/x-ms-wma-pro";
+constexpr const char *kQcomMimeWmaLossless = "audio/x-ms-wma-lossless";
+constexpr const char *kQcomMimeAmrWbPlus = "audio/amr-wb-plus";
+
+// libOmxAmrwbplusDec reports this value as the input port eEncoding.
+constexpr int32_t kQcomAudioCodingAmrWbPlus = 0x7F200000;
+
+constexpr OMX_U32 kQcomInputPort = 0;
+
+bool IsQcomWmaMime(const char *mime) {
+    return !strcasecmp(mime, kQcomMimeWma)
+            || !strcasecmp(mime, kQcomMimeWmaPro)
+            || !strcasecmp(mime, kQcomMimeWmaLossless);
+}
+
+// The WMA and AMR-WB+ components write every input buffer to the DSP through
+// AUDIO_ASYNC_WRITE and test only OMX_BUFFERFLAG_EOS, so codec-specific data
+// would reach the decoder as a frame.
+bool IsQcomDspCsdlessDecoder(const AString &componentName) {
+    return componentName.startsWith("OMX.qcom.audio.decoder.wma")
+            || componentName == "OMX.qcom.audio.decoder.amrwbplus";
+}
+
+const char *QcomWmaMimeForComponent(const AString &componentName) {
+    if (componentName == "OMX.qcom.audio.decoder.wma10Pro") {
+        return kQcomMimeWmaPro;
+    }
+    if (componentName == "OMX.qcom.audio.decoder.wmaLossLess") {
+        return kQcomMimeWmaLossless;
+    }
+    return kQcomMimeWma;
+}
+
+// WAVEFORMATEX as the ASF Stream Properties Object stores it: little-endian
+// wFormatTag, nChannels, nSamplesPerSec, nAvgBytesPerSec, nBlockAlign,
+// wBitsPerSample, cbSize, then cbSize bytes of codec data.
+struct WaveFormatEx {
+    uint16_t formatTag;
+    uint16_t channels;
+    uint32_t sampleRate;
+    uint32_t avgBytesPerSec;
+    uint16_t blockAlign;
+    uint16_t bitsPerSample;
+    const uint8_t *extra;
+    size_t extraSize;
+};
+
+uint16_t ReadLe16(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
+uint32_t ReadLe32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)
+            | ((uint32_t)p[3] << 24);
+}
+
+bool ParseWaveFormatEx(const sp<ABuffer> &csd, WaveFormatEx *wfx) {
+    const uint8_t *p = csd->data();
+    size_t size = csd->size();
+    if (size < 18) {
+        return false;
+    }
+    wfx->formatTag = ReadLe16(p);
+    wfx->channels = ReadLe16(p + 2);
+    wfx->sampleRate = ReadLe32(p + 4);
+    wfx->avgBytesPerSec = ReadLe32(p + 8);
+    wfx->blockAlign = ReadLe16(p + 12);
+    wfx->bitsPerSample = ReadLe16(p + 14);
+    size_t cbSize = ReadLe16(p + 16);
+    if (cbSize > size - 18) {
+        return false;
+    }
+    wfx->extra = p + 18;
+    wfx->extraSize = cbSize;
+    return true;
+}
+
+// QOMX_AUDIO_PARAM_WMA10PROTYPE from the CAF QOMX_AudioExtensions.h, read by
+// libOmxWmaDec through the "OMX.Qualcomm.index.audio.wma10Pro" extension.
+struct QcomWma10ProParams {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32 nPortIndex;
+    OMX_U16 nChannels;
+    OMX_U32 nBitRate;
+    OMX_U32 eFormat;
+    OMX_AUDIO_WMAPROFILETYPE eProfile;
+    OMX_U32 nSamplingRate;
+    OMX_U16 nBlockAlign;
+    OMX_U16 nEncodeOptions;
+    OMX_U32 nSuperBlockAlign;
+    OMX_U32 validBitsPerSample;
+    OMX_U32 formatTag;
+    OMX_U32 advancedEncodeOpt;
+    OMX_U32 advancedEncodeOpt2;
+    OMX_U16 nVirtualPktSize;
+};
+static_assert(sizeof(QcomWma10ProParams) == 60, "QOMX_AUDIO_PARAM_WMA10PROTYPE layout");
+
+// QOMX_AUDIO_PARAM_AMRWBPLUSTYPE from the CAF QOMX_AudioExtensions.h.
+struct QcomAmrWbPlusParams {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32 nPortIndex;
+    OMX_U32 nChannels;
+    OMX_U32 nBitRate;
+    OMX_U32 nSampleRate;
+    OMX_AUDIO_AMRBANDMODETYPE eAMRBandMode;
+    OMX_AUDIO_AMRDTXMODETYPE eAMRDTXMode;
+    OMX_AUDIO_AMRFRAMEFORMATTYPE eAMRFrameFormat;
+};
+static_assert(sizeof(QcomAmrWbPlusParams) == 36, "QOMX_AUDIO_PARAM_AMRWBPLUSTYPE layout");
+
+// The qdsp6v2 AIO drivers (audio_wma.c, audio_wmapro.c) reject more than two
+// channels and sample rates above 48 kHz, and audio_wmapro.c accepts 16- and
+// 24-bit samples with format tags 0x162, 0x163, 0x166 and 0x167.
+status_t SetupQcomWmaDecoder(
+        const sp<IOMXNode> &node, const char *mime, const sp<AMessage> &msg) {
+    sp<ABuffer> csd;
+    WaveFormatEx wfx;
+    if (!msg->findBuffer("csd-0", &csd) || !ParseWaveFormatEx(csd, &wfx)) {
+        ALOGE("%s needs WAVEFORMATEX in csd-0", mime);
+        return BAD_VALUE;
+    }
+    if (wfx.channels < 1 || wfx.channels > 2
+            || wfx.sampleRate == 0 || wfx.sampleRate > 48000) {
+        ALOGW("%s: %u channels at %u Hz exceed the DSP decoder",
+                mime, wfx.channels, wfx.sampleRate);
+        return ERROR_UNSUPPORTED;
+    }
+
+    if (!strcasecmp(mime, kQcomMimeWma)) {
+        // libOmxWmaDec labels every standard stream format tag 0x161, so
+        // WMA 1 (0x160) has no DSP path. WMAUDIO2WAVEFORMAT codec data:
+        // dwSamplesPerBlock, wEncodeOptions, dwSuperBlockAlign.
+        if (wfx.formatTag != 0x161 || wfx.extraSize < 6) {
+            ALOGW("WMA format tag 0x%x with %zu codec bytes is unsupported",
+                    wfx.formatTag, wfx.extraSize);
+            return ERROR_UNSUPPORTED;
+        }
+        OMX_AUDIO_PARAM_WMATYPE params;
+        InitOMXParams(&params);
+        params.nPortIndex = kQcomInputPort;
+        status_t err = node->getParameter(OMX_IndexParamAudioWma, &params, sizeof(params));
+        if (err != OK) {
+            return err;
+        }
+        params.nChannels = wfx.channels;
+        params.nSamplingRate = wfx.sampleRate;
+        params.nBitRate = wfx.avgBytesPerSec * 8;
+        params.nBlockAlign = wfx.blockAlign;
+        params.nEncodeOptions = ReadLe16(wfx.extra + 4);
+        if (wfx.extraSize >= 10) {
+            params.nSuperBlockAlign = ReadLe32(wfx.extra + 6);
+        }
+        return node->setParameter(OMX_IndexParamAudioWma, &params, sizeof(params));
+    }
+
+    bool lossless = !strcasecmp(mime, kQcomMimeWmaLossless);
+    bool tagMatches = lossless
+            ? wfx.formatTag == 0x163
+            : (wfx.formatTag == 0x162 || wfx.formatTag == 0x166 || wfx.formatTag == 0x167);
+    // WMAUDIO3WAVEFORMAT codec data: wValidBitsPerSample, dwChannelMask,
+    // dwReserved1, dwReserved2, wEncodeOptions, wReserved3. The component
+    // forwards dwReserved2 and wReserved3 as the advanced encode options.
+    if (!tagMatches || wfx.extraSize < 18) {
+        ALOGW("%s: format tag 0x%x with %zu codec bytes is unsupported",
+                mime, wfx.formatTag, wfx.extraSize);
+        return ERROR_UNSUPPORTED;
+    }
+    uint16_t validBits = ReadLe16(wfx.extra);
+    if (validBits != 16 && validBits != 24) {
+        ALOGW("%s: %u-bit samples exceed the DSP decoder", mime, validBits);
+        return ERROR_UNSUPPORTED;
+    }
+    OMX_INDEXTYPE index;
+    status_t err = node->getExtensionIndex("OMX.Qualcomm.index.audio.wma10Pro", &index);
+    if (err != OK) {
+        return err;
+    }
+    QcomWma10ProParams params;
+    InitOMXParams(&params);
+    params.nPortIndex = kQcomInputPort;
+    err = node->getParameter(index, &params, sizeof(params));
+    if (err != OK) {
+        return err;
+    }
+    params.nChannels = wfx.channels;
+    params.nSamplingRate = wfx.sampleRate;
+    params.nBitRate = wfx.avgBytesPerSec * 8;
+    params.nBlockAlign = wfx.blockAlign;
+    params.nEncodeOptions = ReadLe16(wfx.extra + 14);
+    params.validBitsPerSample = validBits;
+    params.formatTag = wfx.formatTag;
+    params.advancedEncodeOpt = ReadLe16(wfx.extra + 16);
+    params.advancedEncodeOpt2 = ReadLe32(wfx.extra + 10);
+    params.nVirtualPktSize = wfx.blockAlign;
+    return node->setParameter(index, &params, sizeof(params));
+}
+
+status_t SetupQcomAmrWbPlusDecoder(const sp<IOMXNode> &node, const sp<AMessage> &msg) {
+    int32_t numChannels, sampleRate;
+    if (!msg->findInt32("channel-count", &numChannels)
+            || !msg->findInt32("sample-rate", &sampleRate)) {
+        return INVALID_OPERATION;
+    }
+    OMX_INDEXTYPE index;
+    status_t err = node->getExtensionIndex("OMX.Qualcomm.index.audio.amrwbplus", &index);
+    if (err != OK) {
+        return err;
+    }
+    QcomAmrWbPlusParams params;
+    InitOMXParams(&params);
+    params.nPortIndex = kQcomInputPort;
+    err = node->getParameter(index, &params, sizeof(params));
+    if (err != OK) {
+        return err;
+    }
+    params.nChannels = numChannels;
+    params.nSampleRate = sampleRate;
+    return node->setParameter(index, &params, sizeof(params));
+}
+
+}  // namespace
+#endif  // STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+
 struct CodecObserver : public BnOMXObserver {
     explicit CodecObserver(const sp<AMessage> &msg) : mNotify(msg) {}
 
@@ -2398,6 +2628,13 @@ status_t ACodec::configureCodec(
             err = setupAC4Codec(encoder, numChannels, sampleRate);
         }
     }
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+    else if (!encoder && IsQcomWmaMime(mime)) {
+        err = SetupQcomWmaDecoder(mOMXNode, mime, msg);
+    } else if (!encoder && !strcasecmp(mime, kQcomMimeAmrWbPlus)) {
+        err = SetupQcomAmrWbPlusDecoder(mOMXNode, msg);
+    }
+#endif
 
     if (err != OK) {
         return err;
@@ -5730,6 +5967,34 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                     break;
                 }
 
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+                // QCELP-13 (3GPP2 C.S0020) and EVRC (3GPP2 C.S0014) are 8 kHz
+                // mono vocoders; the Qualcomm vocoder components report these
+                // codings on their compressed port.
+                case OMX_AUDIO_CodingQCELP13:
+                case OMX_AUDIO_CodingEVRC:
+                {
+                    notify->setString("mime",
+                            audioDef->eEncoding == OMX_AUDIO_CodingQCELP13
+                                    ? MEDIA_MIMETYPE_AUDIO_QCELP : MEDIA_MIMETYPE_AUDIO_EVRC);
+                    notify->setInt32("channel-count", 1);
+                    notify->setInt32("sample-rate", 8000);
+                    break;
+                }
+
+                case OMX_AUDIO_CodingWMA:
+                {
+                    notify->setString("mime", QcomWmaMimeForComponent(mComponentName));
+                    break;
+                }
+
+                case kQcomAudioCodingAmrWbPlus:
+                {
+                    notify->setString("mime", kQcomMimeAmrWbPlus);
+                    break;
+                }
+#endif
+
                 default:
                     ALOGE("Unsupported audio coding: %s(%d)\n",
                             asString(audioDef->eEncoding), audioDef->eEncoding);
@@ -6365,6 +6630,14 @@ void ACodec::BaseState::onInputBufferFilled(const sp<AMessage> &msg) {
                         postFillThisBuffer(info);
                         break;
                     }
+#ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
+                    if (IsQcomDspCsdlessDecoder(mCodec->mComponentName)) {
+                        ALOGV("[%s] takes its configuration from the format. Ignore %u codec"
+                                " specific data", mCodec->mComponentName.c_str(), bufferID);
+                        postFillThisBuffer(info);
+                        break;
+                    }
+#endif
                     flags |= OMX_BUFFERFLAG_CODECCONFIG;
                 }
 

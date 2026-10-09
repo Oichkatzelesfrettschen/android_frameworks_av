@@ -955,6 +955,14 @@ size_t NuPlayer::Renderer::fillAudioBuffer(void *buffer, size_t size) {
         entry = &*mAudioQueue.begin();
 
         if (entry->mBuffer == NULL) { // EOS
+            // AudioTrack::stop() pins the server's readable end at the rear the
+            // client has already released, and the bytes copied in this call
+            // are released only after it returns. Return them first; the sink
+            // calls back for the remaining space on the same thread, and that
+            // call finds EOS with nothing copied and posts the stop.
+            if (sizeCopied > 0) {
+                break;
+            }
             hasEOS = true;
             mAudioQueue.erase(mAudioQueue.begin());
             break;

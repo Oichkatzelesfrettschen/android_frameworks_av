@@ -308,7 +308,9 @@ static_assert(sizeof(QcomAmrWbPlusParams) == 36, "QOMX_AUDIO_PARAM_AMRWBPLUSTYPE
 
 // The qdsp6v2 AIO drivers (audio_wma.c, audio_wmapro.c) reject more than two
 // channels and sample rates above 48 kHz, and audio_wmapro.c accepts 16- and
-// 24-bit samples with format tags 0x162, 0x163, 0x166 and 0x167.
+// 24-bit samples with format tags 0x162, 0x163, 0x166 and 0x167. libOmxWmaDec
+// matches the extension name "OMX.Qualcomm.index.audio.wma10Pro" with a
+// case-sensitive strncmp, so the capital P is required.
 status_t SetupQcomWmaDecoder(
         const sp<IOMXNode> &node, const char *mime, const sp<AMessage> &msg) {
     sp<ABuffer> csd;
@@ -351,10 +353,12 @@ status_t SetupQcomWmaDecoder(
         return node->setParameter(OMX_IndexParamAudioWma, &params, sizeof(params));
     }
 
+    // apr_audio-v2.h ASM WMA Pro format tags: 0x162 WMA 9 Pro, 0x163 WMA 9 Pro
+    // Lossless, 0x166 WMA 10 Pro, 0x167 WMA 10 Pro Lossless.
     bool lossless = !strcasecmp(mime, kQcomMimeWmaLossless);
     bool tagMatches = lossless
-            ? wfx.formatTag == 0x163
-            : (wfx.formatTag == 0x162 || wfx.formatTag == 0x166 || wfx.formatTag == 0x167);
+            ? (wfx.formatTag == 0x163 || wfx.formatTag == 0x167)
+            : (wfx.formatTag == 0x162 || wfx.formatTag == 0x166);
     // WMAUDIO3WAVEFORMAT codec data: wValidBitsPerSample, dwChannelMask,
     // dwReserved1, dwReserved2, wEncodeOptions, wReserved3. The component
     // forwards dwReserved2 and wReserved3 as the advanced encode options.

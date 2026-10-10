@@ -38,12 +38,15 @@
 #include <media/stagefright/OmxInfoBuilder.h>
 #include <media/stagefright/PersistentSurface.h>
 
+#include <strings.h>
 #include <sys/stat.h>
 #include <utils/threads.h>
 
 #include <cutils/properties.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <regex>
 
 namespace android {
@@ -411,7 +414,89 @@ void MediaCodecList::findMatchingCodecs(
         formatNoProfile->removeEntryByName(KEY_PROFILE);
         findMatchingCodecs(mime, encoder, flags, formatNoProfile, matches);
     }
+
+    // The declared audio limits are advisory: when they exclude every codec, list the codecs the
+    // type alone selects, so a stream that a codec with understated limits still decodes reaches
+    // it, as it did before the limits were checked.
+    int32_t audioParam;
+    if (matches->empty() && format != nullptr && strncasecmp(mime, "audio/", 6) == 0
+            && (format->findInt32(KEY_CHANNEL_COUNT, &audioParam)
+                    || format->findInt32(KEY_SAMPLE_RATE, &audioParam))) {
+        ALOGV("no matching codec found, retrying without channel count and sample rate");
+        sp<AMessage> formatNoAudioParams = format->dup();
+        formatNoAudioParams->removeEntryByName(KEY_CHANNEL_COUNT);
+        formatNoAudioParams->removeEntryByName(KEY_SAMPLE_RATE);
+        findMatchingCodecs(mime, encoder, flags, formatNoAudioParams, matches);
+    }
 }
+
+namespace {
+
+// Parses a comma separated list of integer ranges ("N" or "N-M" entries), the layout of the
+// "sample-rate-ranges" and "channel-ranges" capability details. Entries that do not parse are
+// skipped; returns whether any entry parsed.
+bool parseRangeList(const AString &list, std::vector<Range<int32_t>> *ranges) {
+    const std::string str(list.c_str());
+    size_t start = 0;
+    while (start <= str.size()) {
+        size_t end = str.find(',', start);
+        if (end == std::string::npos) {
+            end = str.size();
+        }
+        std::optional<Range<int32_t>> range = Range<int32_t>::Parse(str.substr(start, end - start));
+        if (range) {
+            ranges->push_back(range.value());
+        }
+        start = end + 1;
+    }
+    return !ranges->empty();
+}
+
+bool anyRangeContains(const std::vector<Range<int32_t>> &ranges, int32_t value) {
+    return std::any_of(ranges.begin(), ranges.end(),
+            [value](const Range<int32_t> &range) { return range.contains(value); });
+}
+
+// The channel counts a codec declares in its capability details, with the precedence
+// AudioCapabilities::parseFromInfo applies: "channel-ranges", then "channel-range", then
+// "max-channel-count" (1..N, and 0 meaning no input channel). A codec that declares nothing, or
+// only values that do not parse, accepts any count.
+bool detailsAllowChannelCount(const sp<AMessage> &details, int32_t channelCount) {
+    AString value;
+    std::vector<Range<int32_t>> ranges;
+    if (details->findString("channel-ranges", &value)) {
+        return !parseRangeList(value, &ranges) || anyRangeContains(ranges, channelCount);
+    }
+    if (details->findString("channel-range", &value)) {
+        std::optional<Range<int32_t>> range = Range<int32_t>::Parse(std::string(value.c_str()));
+        return !range || range.value().contains(channelCount);
+    }
+    if (details->findString("max-channel-count", &value)) {
+        const char *text = value.c_str();
+        char *end = nullptr;
+        errno = 0;
+        const long long maxCount = std::strtoll(text, &end, 10);
+        if (end == text || *end != '\0' || errno != 0 || maxCount < 0
+                || maxCount > INT32_MAX) {
+            return true;
+        }
+        return maxCount != 0 && channelCount >= 1 && channelCount <= maxCount;
+    }
+    return true;
+}
+
+// The sample rates a codec declares in "sample-rate-ranges"; a codec that declares nothing, or
+// only values that do not parse, accepts any rate.
+bool detailsAllowSampleRate(const sp<AMessage> &details, int32_t sampleRate) {
+    AString value;
+    std::vector<Range<int32_t>> ranges;
+    if (!details->findString("sample-rate-ranges", &value)) {
+        return true;
+    }
+    return !parseRangeList(value, &ranges) || anyRangeContains(ranges, sampleRate);
+}
+
+}  // namespace
 
 // static
 bool MediaCodecList::codecHandlesFormat(
@@ -538,6 +623,25 @@ bool MediaCodecList::codecHandlesFormat(
                 ALOGV("Codec does not support profile %d", profile);
                 return false;
             }
+        }
+    }
+
+    // A stream whose channel count or sample rate lies outside the limits the codec declares
+    // cannot be configured on it, and playback callers use the first codec listed here without a
+    // fallback, so such a codec must not be listed ahead of one that can decode the stream. Only
+    // positive values are checked: zero marks an unspecified stream parameter.
+    if (strncasecmp(mime, "audio/", 6) == 0) {
+        int32_t channelCount = -1;
+        if (format->findInt32(KEY_CHANNEL_COUNT, &channelCount) && channelCount > 0
+                && !detailsAllowChannelCount(details, channelCount)) {
+            ALOGV("format has %d channels, outside the codec's channel limits", channelCount);
+            return false;
+        }
+        int32_t sampleRate = -1;
+        if (format->findInt32(KEY_SAMPLE_RATE, &sampleRate) && sampleRate > 0
+                && !detailsAllowSampleRate(details, sampleRate)) {
+            ALOGV("format has sample rate %d, outside the codec's sample rate limits", sampleRate);
+            return false;
         }
     }
 

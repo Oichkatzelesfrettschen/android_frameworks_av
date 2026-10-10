@@ -45,7 +45,12 @@ cc_defaults {
         "libcodec2_soft_gsmdec",
         "libcodec2_soft_apvenc",
         "libcodec2_soft_apvdec",
-    ],
+    ] + select(soong_config_variable("stagefright", "a11_vp6_codec2"), {
+        // Products that ship the FFmpeg-based On2 VP6 component set
+        // $(call soong_config_set,stagefright,a11_vp6_codec2,true).
+        "true": ["libcodec2_soft_a11vp6dec"],
+        default: [],
+    }),
 }
 
 cc_library {

@@ -1203,6 +1203,8 @@ C2PlatformComponentStore::C2PlatformComponentStore()
     emplace("libcodec2_soft_rawdec.so");
     emplace("libcodec2_soft_vorbisdec.so");
     emplace("libcodec2_soft_vp8dec.so");
+    // Product-provided component (not built on products that omit it).
+    emplace("libcodec2_soft_a11vp6dec.so");
     emplace("libcodec2_soft_vp8enc.so");
     emplace("libcodec2_soft_vp9dec.so");
     emplace("libcodec2_soft_vp9enc.so");

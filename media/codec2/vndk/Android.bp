@@ -41,6 +41,25 @@ cc_library_headers {
 
 // !!!DO NOT DEPEND ON THIS SHARED LIBRARY DIRECTLY!!!
 // use libcodec2-impl-defaults instead
+// Products that set $(call soong_config_set,stagefright,a11_vp6_codec2,true)
+// install libcodec2_soft_a11vp6dec, and the platform store lists it there.
+soong_config_module_type {
+    name: "codec2_vndk_product_components_defaults",
+    module_type: "cc_defaults",
+    config_namespace: "stagefright",
+    bool_variables: ["a11_vp6_codec2"],
+    properties: ["cflags"],
+}
+
+codec2_vndk_product_components_defaults {
+    name: "libcodec2_vndk-product-components",
+    soong_config_variables: {
+        a11_vp6_codec2: {
+            cflags: ["-DCODEC2_PRODUCT_A11_VP6"],
+        },
+    },
+}
+
 cc_library {
     name: "libcodec2_vndk",
     vendor_available: true,
@@ -55,6 +74,7 @@ cc_library {
     defaults: [
         "aconfig_lib_cc_static_link.defaults",
         "libcodec2_hal_selection",
+        "libcodec2_vndk-product-components",
     ],
 
     srcs: [

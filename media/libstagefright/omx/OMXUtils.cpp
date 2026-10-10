@@ -189,6 +189,21 @@ const char *GetComponentRole(bool isEncoder, const char *mime) {
             "video_decoder.vc1", NULL },
         { "video/wvc1",
             "video_decoder.wvc1", NULL },
+        // DivX 3.11, 4 and 5/6 and Sorenson Spark. Each MIME type carries its
+        // own role name because MediaCodecsXmlParser accepts one MIME type
+        // per role; SetComponentRole translates the three DivX names to the
+        // "video_decoder.divx" role the components enumerate.
+        { "video/divx311",
+            "video_decoder.divx311", NULL },
+        // MatroskaExtractor reports DIV3 and DIV4 tracks as video/divx3.
+        { "video/divx3",
+            "video_decoder.divx3", NULL },
+        { "video/divx4",
+            "video_decoder.divx4", NULL },
+        { "video/divx",
+            "video_decoder.divx", NULL },
+        { "video/x-flv1",
+            "video_decoder.spark", NULL },
         { "audio/x-ms-wma",
             "audio_decoder.wma", NULL },
         { "audio/x-ms-wma-pro",
@@ -223,7 +238,8 @@ namespace {
 
 // Role names GetComponentRole gives the Qualcomm codecs, mapped to the role
 // strings the components accept in OMX_IndexParamStandardComponentRole:
-// omx_vdec takes only "video_decoder.vc1" for its vc1 and wmv kinds, and
+// omx_vdec takes only "video_decoder.vc1" for its vc1 and wmv kinds,
+// "video_decoder.divx" for its divx311, divx4 and divx kinds, and
 // libOmxWmaDec enumerates "audio_decoder.wma" for all three WMA components.
 // ACodec::queryCapabilities and ACodec::setComponentRole both set the role
 // through SetComponentRole.
@@ -234,6 +250,9 @@ struct QcomRoleAlias {
 
 constexpr QcomRoleAlias kQcomRoleAliases[] = {
     { "video_decoder.wvc1", "video_decoder.vc1" },
+    { "video_decoder.divx311", "video_decoder.divx" },
+    { "video_decoder.divx3", "video_decoder.divx" },
+    { "video_decoder.divx4", "video_decoder.divx" },
     { "audio_decoder.wma10pro", "audio_decoder.wma" },
     { "audio_decoder.wmalossless", "audio_decoder.wma" },
 };

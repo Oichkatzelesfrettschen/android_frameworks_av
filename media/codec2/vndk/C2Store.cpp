@@ -1203,6 +1203,11 @@ C2PlatformComponentStore::C2PlatformComponentStore()
     emplace("libcodec2_soft_rawdec.so");
     emplace("libcodec2_soft_vorbisdec.so");
     emplace("libcodec2_soft_vp8dec.so");
+#ifdef CODEC2_PRODUCT_A11_VP6
+    // ComponentModule::init aborts on a failed dlopen, so the store lists this
+    // component only on products whose build installs the library.
+    emplace("libcodec2_soft_a11vp6dec.so");
+#endif
     emplace("libcodec2_soft_vp8enc.so");
     emplace("libcodec2_soft_vp9dec.so");
     emplace("libcodec2_soft_vp9enc.so");

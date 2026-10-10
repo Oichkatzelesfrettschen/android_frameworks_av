@@ -3810,6 +3810,7 @@ static const struct VideoCodingMapEntry {
     // DivX 3.11, 4 and 5/6 share one coding; the configured type names the
     // stream.
     { "video/divx311", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
+    { "video/divx3", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
     { "video/divx4", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
     { "video/divx", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
     { "video/x-flv1", (OMX_VIDEO_CODINGTYPE)0x7FA30C03 },

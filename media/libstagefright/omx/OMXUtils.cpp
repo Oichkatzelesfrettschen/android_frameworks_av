@@ -195,6 +195,9 @@ const char *GetComponentRole(bool isEncoder, const char *mime) {
         // "video_decoder.divx" role the components enumerate.
         { "video/divx311",
             "video_decoder.divx311", NULL },
+        // MatroskaExtractor reports DIV3 and DIV4 tracks as video/divx3.
+        { "video/divx3",
+            "video_decoder.divx3", NULL },
         { "video/divx4",
             "video_decoder.divx4", NULL },
         { "video/divx",
@@ -248,6 +251,7 @@ struct QcomRoleAlias {
 constexpr QcomRoleAlias kQcomRoleAliases[] = {
     { "video_decoder.wvc1", "video_decoder.vc1" },
     { "video_decoder.divx311", "video_decoder.divx" },
+    { "video_decoder.divx3", "video_decoder.divx" },
     { "video_decoder.divx4", "video_decoder.divx" },
     { "audio_decoder.wma10pro", "audio_decoder.wma" },
     { "audio_decoder.wmalossless", "audio_decoder.wma" },

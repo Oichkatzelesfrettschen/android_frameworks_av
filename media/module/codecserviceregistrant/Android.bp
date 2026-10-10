@@ -45,12 +45,27 @@ cc_defaults {
         "libcodec2_soft_gsmdec",
         "libcodec2_soft_apvenc",
         "libcodec2_soft_apvdec",
-    ] + select(soong_config_variable("stagefright", "a11_vp6_codec2"), {
-        // Products that ship the FFmpeg-based On2 VP6 component set
-        // $(call soong_config_set,stagefright,a11_vp6_codec2,true).
-        "true": ["libcodec2_soft_a11vp6dec"],
-        default: [],
-    }),
+    ],
+}
+
+// Products that ship the On2 VP6 Codec2 component set
+// $(call soong_config_set,stagefright,a11_vp6_codec2,true) in their board
+// config; the library joins the software codec runtime set.
+soong_config_module_type {
+    name: "codec2_product_runtime_libs_defaults",
+    module_type: "cc_defaults",
+    config_namespace: "stagefright",
+    bool_variables: ["a11_vp6_codec2"],
+    properties: ["runtime_libs"],
+}
+
+codec2_product_runtime_libs_defaults {
+    name: "libcodec2-product-runtime-libs",
+    soong_config_variables: {
+        a11_vp6_codec2: {
+            runtime_libs: ["libcodec2_soft_a11vp6dec"],
+        },
+    },
 }
 
 cc_library {
@@ -76,6 +91,7 @@ cc_library {
         "libcodec2-aidl-defaults",
         "libcodec2-hidl-defaults",
         "libcodec2-runtime-libs",
+        "libcodec2-product-runtime-libs",
     ],
     shared_libs: [
         "libbase",

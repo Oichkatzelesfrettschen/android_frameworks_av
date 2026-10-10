@@ -3805,6 +3805,14 @@ static const struct VideoCodingMapEntry {
     // and wmv kinds both report OMX_VIDEO_CodingWMV on their input port.
     { "video/x-ms-wmv", OMX_VIDEO_CodingWMV },
     { "video/wvc1", OMX_VIDEO_CodingWMV },
+    // The omx_vdec divx kinds report QOMX_VIDEO_CodingDivx (0x7FA30C02) and
+    // the spark kind QOMX_VIDEO_CodingSpark (0x7FA30C03) on their input port.
+    // DivX 3.11, 4 and 5/6 share one coding; the configured type names the
+    // stream.
+    { "video/divx311", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
+    { "video/divx4", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
+    { "video/divx", (OMX_VIDEO_CODINGTYPE)0x7FA30C02 },
+    { "video/x-flv1", (OMX_VIDEO_CODINGTYPE)0x7FA30C03 },
 #endif
 };
 
@@ -5659,10 +5667,12 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                         notify->setString("mime", "application/octet-stream");
                     } else {
 #ifdef STAGEFRIGHT_OMX_LEGACY_QCOM_CODECS
-                        // video/x-ms-wmv and video/wvc1 share OMX_VIDEO_CodingWMV,
-                        // so the configured type names the stream.
+                        // video/x-ms-wmv and video/wvc1 share OMX_VIDEO_CodingWMV, and
+                        // video/divx311, video/divx4 and video/divx share
+                        // QOMX_VIDEO_CodingDivx, so the configured type names the stream.
                         AString configured;
-                        if (videoDef->eCompressionFormat == OMX_VIDEO_CodingWMV
+                        if ((videoDef->eCompressionFormat == OMX_VIDEO_CodingWMV
+                                    || (int32_t)videoDef->eCompressionFormat == 0x7FA30C02)
                                 && mConfigFormat != nullptr
                                 && mConfigFormat->findString("mime", &configured)) {
                             mime = configured;

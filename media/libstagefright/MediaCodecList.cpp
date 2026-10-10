@@ -38,12 +38,15 @@
 #include <media/stagefright/OmxInfoBuilder.h>
 #include <media/stagefright/PersistentSurface.h>
 
+#include <strings.h>
 #include <sys/stat.h>
 #include <utils/threads.h>
 
 #include <cutils/properties.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <regex>
 
 namespace android {
@@ -416,7 +419,7 @@ void MediaCodecList::findMatchingCodecs(
     // type alone selects, so a stream that a codec with understated limits still decodes reaches
     // it, as it did before the limits were checked.
     int32_t audioParam;
-    if (matches->empty() && format != nullptr && strncmp(mime, "audio/", 6) == 0
+    if (matches->empty() && format != nullptr && strncasecmp(mime, "audio/", 6) == 0
             && (format->findInt32(KEY_CHANNEL_COUNT, &audioParam)
                     || format->findInt32(KEY_SAMPLE_RATE, &audioParam))) {
         ALOGV("no matching codec found, retrying without channel count and sample rate");
@@ -469,7 +472,14 @@ bool detailsAllowChannelCount(const sp<AMessage> &details, int32_t channelCount)
         return !range || range.value().contains(channelCount);
     }
     if (details->findString("max-channel-count", &value)) {
-        const int32_t maxCount = std::atoi(value.c_str());
+        const char *text = value.c_str();
+        char *end = nullptr;
+        errno = 0;
+        const long long maxCount = std::strtoll(text, &end, 10);
+        if (end == text || *end != '\0' || errno != 0 || maxCount < 0
+                || maxCount > INT32_MAX) {
+            return true;
+        }
         return maxCount != 0 && channelCount >= 1 && channelCount <= maxCount;
     }
     return true;
@@ -620,7 +630,7 @@ bool MediaCodecList::codecHandlesFormat(
     // cannot be configured on it, and playback callers use the first codec listed here without a
     // fallback, so such a codec must not be listed ahead of one that can decode the stream. Only
     // positive values are checked: zero marks an unspecified stream parameter.
-    if (strncmp(mime, "audio/", 6) == 0) {
+    if (strncasecmp(mime, "audio/", 6) == 0) {
         int32_t channelCount = -1;
         if (format->findInt32(KEY_CHANNEL_COUNT, &channelCount) && channelCount > 0
                 && !detailsAllowChannelCount(details, channelCount)) {

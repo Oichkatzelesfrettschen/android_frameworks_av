@@ -150,6 +150,11 @@ public:
             /*out*/
             sp<hardware::ICamera>* device);
 
+    virtual binder::Status     connectLegacyWithOomScoreOffset(
+            const sp<hardware::ICameraClient>& cameraClient, int32_t cameraId, int32_t halVersion,
+            const String16& clientPackageName, int32_t clientUid, int clientPid, int oomScoreOffset,
+            /*out*/ sp<hardware::ICamera>* device);
+
     virtual binder::Status     connectDevice(
             const sp<hardware::camera2::ICameraDeviceCallbacks>& cameraCb, const String16& cameraId,
             const String16& clientPackageName, const std::optional<String16>& clientFeatureId,
@@ -788,6 +793,10 @@ private:
     // This function expects @param normalDeviceIds, to have normalDeviceIds
     // sorted in alpha-numeric order.
     void filterAPI1SystemCameraLocked(const std::vector<std::string> &normalDeviceIds);
+
+    // Validate priority changes against the Binder caller's SYSTEM_CAMERA permission.
+    binder::Status validateOomScoreOffset(const String8& cameraId,
+            const String16& clientPackageName, int oomScoreOffset);
 
     // Single implementation shared between the various connect calls
     template<class CALLBACK, class CLIENT>

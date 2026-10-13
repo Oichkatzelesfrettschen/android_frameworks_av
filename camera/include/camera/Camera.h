@@ -87,6 +87,10 @@ public:
     static  status_t  connectLegacy(int cameraId, int halVersion,
                                      const String16& clientPackageName,
                                      int clientUid, int clientPid, sp<Camera>& camera);
+    static  status_t  connectLegacy(int cameraId, int halVersion,
+                                     const String16& clientPackageName,
+                                     int clientUid, int clientPid, int oomScoreOffset,
+                                     sp<Camera>& camera);
 
             virtual     ~Camera();
 

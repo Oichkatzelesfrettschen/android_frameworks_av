@@ -224,4 +224,12 @@ interface ICameraService
     const int DEVICE_STATE_FOLDED = 4;
     const int DEVICE_STATE_LAST_FRAMEWORK_BIT = 0x80000000; // 1 << 31;
 
+    /**
+     * Open a legacy device with the same priority-offset policy as connectDevice.
+     * The appended method preserves the existing camera-service transaction IDs.
+     */
+    ICamera connectLegacyWithOomScoreOffset(ICameraClient client,
+            int cameraId, int halVersion, String opPackageName,
+            int clientUid, int clientPid, int oomScoreOffset);
+
 }

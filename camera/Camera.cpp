@@ -83,6 +83,15 @@ status_t Camera::connectLegacy(int cameraId, int halVersion,
         int clientUid, int clientPid,
         sp<Camera>& camera)
 {
+    return connectLegacy(cameraId, halVersion, clientPackageName,
+            clientUid, clientPid, /*oomScoreOffset*/ 0, camera);
+}
+
+status_t Camera::connectLegacy(int cameraId, int halVersion,
+        const String16& clientPackageName,
+        int clientUid, int clientPid, int oomScoreOffset,
+        sp<Camera>& camera)
+{
     ALOGV("%s: connect legacy camera device", __FUNCTION__);
     sp<Camera> c = new Camera(cameraId);
     sp<::android::hardware::ICameraClient> cl = c;
@@ -91,8 +100,14 @@ status_t Camera::connectLegacy(int cameraId, int halVersion,
 
     binder::Status ret;
     if (cs != nullptr) {
-        ret = cs.get()->connectLegacy(cl, cameraId, halVersion, clientPackageName,
-                clientUid, clientPid, /*out*/&(c->mCamera));
+        if (oomScoreOffset == 0) {
+            ret = cs.get()->connectLegacy(cl, cameraId, halVersion, clientPackageName,
+                    clientUid, clientPid, /*out*/&(c->mCamera));
+        } else {
+            ret = cs.get()->connectLegacyWithOomScoreOffset(cl, cameraId, halVersion,
+                    clientPackageName, clientUid, clientPid, oomScoreOffset,
+                    /*out*/&(c->mCamera));
+        }
     }
     if (ret.isOk() && c->mCamera != nullptr) {
         IInterface::asBinder(c->mCamera)->linkToDeath(c);

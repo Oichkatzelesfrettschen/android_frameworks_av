@@ -1600,11 +1600,48 @@ Status CameraService::connect(
     return ret;
 }
 
+Status CameraService::validateOomScoreOffset(const String8& id,
+        const String16& clientPackageName, int oomScoreOffset) {
+    int callingPid = CameraThreadState::getCallingPid();
+    if (oomScoreOffset < 0) {
+        String8 msg =
+                String8::format("Cannot increase the priority of a client %s pid %d for "
+                        "camera id %s", String8(clientPackageName).string(), callingPid,
+                        id.string());
+        ALOGE("%s: %s", __FUNCTION__, msg.string());
+        return STATUS_ERROR(ERROR_ILLEGAL_ARGUMENT, msg.string());
+    }
+
+    // enforce system camera permissions
+    if (oomScoreOffset > 0 &&
+            !hasPermissionsForSystemCamera(callingPid, CameraThreadState::getCallingUid())) {
+        String8 msg =
+                String8::format("Cannot change the priority of a client %s pid %d for "
+                        "camera id %s without SYSTEM_CAMERA permissions",
+                        String8(clientPackageName).string(), callingPid, id.string());
+        ALOGE("%s: %s", __FUNCTION__, msg.string());
+        return STATUS_ERROR(ERROR_PERMISSION_DENIED, msg.string());
+    }
+
+    return Status::ok();
+}
+
 Status CameraService::connectLegacy(
         const sp<ICameraClient>& cameraClient,
         int api1CameraId, int halVersion,
         const String16& clientPackageName,
         int clientUid, int clientPid,
+        /*out*/
+        sp<ICamera>* device) {
+    return connectLegacyWithOomScoreOffset(cameraClient, api1CameraId, halVersion,
+            clientPackageName, clientUid, clientPid, /*oomScoreOffset*/ 0, device);
+}
+
+Status CameraService::connectLegacyWithOomScoreOffset(
+        const sp<ICameraClient>& cameraClient,
+        int api1CameraId, int halVersion,
+        const String16& clientPackageName,
+        int clientUid, int clientPid, int oomScoreOffset,
         /*out*/
         sp<ICamera>* device) {
 
@@ -1613,9 +1650,12 @@ Status CameraService::connectLegacy(
 
     Status ret = Status::ok();
     sp<Client> client = nullptr;
+    ret = validateOomScoreOffset(id, clientPackageName, oomScoreOffset);
+    if (!ret.isOk()) return ret;
+
     ret = connectHelper<ICameraClient,Client>(cameraClient, id, api1CameraId, halVersion,
             clientPackageName, {}, clientUid, clientPid, API_1,
-            /*shimUpdateOnly*/ false, /*scoreOffset*/0,
+            /*shimUpdateOnly*/ false, oomScoreOffset,
             __ANDROID_API_FUTURE__, /*out*/client);
 
     if(!ret.isOk()) {
@@ -1709,25 +1749,8 @@ Status CameraService::connectDevice(
         clientPackageNameAdj = String16(vendorClient.c_str());
     }
 
-    if (oomScoreOffset < 0) {
-        String8 msg =
-                String8::format("Cannot increase the priority of a client %s pid %d for "
-                        "camera id %s", String8(clientPackageNameAdj).string(), callingPid,
-                        id.string());
-        ALOGE("%s: %s", __FUNCTION__, msg.string());
-        return STATUS_ERROR(ERROR_ILLEGAL_ARGUMENT, msg.string());
-    }
-
-    // enforce system camera permissions
-    if (oomScoreOffset > 0 &&
-            !hasPermissionsForSystemCamera(callingPid, CameraThreadState::getCallingUid())) {
-        String8 msg =
-                String8::format("Cannot change the priority of a client %s pid %d for "
-                        "camera id %s without SYSTEM_CAMERA permissions",
-                        String8(clientPackageNameAdj).string(), callingPid, id.string());
-        ALOGE("%s: %s", __FUNCTION__, msg.string());
-        return STATUS_ERROR(ERROR_PERMISSION_DENIED, msg.string());
-    }
+    ret = validateOomScoreOffset(id, clientPackageNameAdj, oomScoreOffset);
+    if (!ret.isOk()) return ret;
 
     ret = connectHelper<hardware::camera2::ICameraDeviceCallbacks,CameraDeviceClient>(cameraCb, id,
             /*api1CameraId*/-1,

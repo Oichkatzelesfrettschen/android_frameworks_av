@@ -32,14 +32,24 @@ PREFIX = r"""
 #include <mutex>
 #include <utility>
 #include <cstdio>
+#include <cstdlib>
 #define ALOGE(...) ((void)0)
 #define ALOGV(...) ((void)0)
 #define CC_LIKELY(value) (value)
 using status_t=int;
+[[maybe_unused]] constexpr int DEAD_OBJECT=-32;
 constexpr int OK=0, INVALID_OPERATION=-38, NOT_SET=-1, NATIVE_WINDOW_API_CAMERA=1, NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS=2;
 enum class Status { OK, INTERNAL_ERROR, ILLEGAL_ARGUMENT };
 namespace hardware {
-template<class T> struct Return { T value; Return(T data):value(data) {} operator T() const { return value; } };
+template<class T> struct Return {
+    T value; bool transport=true;
+    Return(T data):value(data) {}
+    Return(T data,bool valid):value(data),transport(valid) {}
+    operator T() const { checkTransport(); return value; }
+    void checkTransport() const { if (!transport) std::abort(); }
+    bool isOk() const { return transport; }
+};
+namespace graphics { namespace common { namespace V1_0 { using PixelFormat=int; } } }
 template<> struct Return<void> {};
 Return<void> Void() { return {}; }
 }
@@ -61,6 +71,7 @@ template<class T> struct sp {
     T* get() const { return pointer; }
     T* operator->() const { return pointer; }
     bool operator==(const sp& other) const { return pointer==other.pointer; }
+    bool operator!=(const sp& other) const { return pointer!=other.pointer; }
     bool operator!=(std::nullptr_t) const { return pointer!=nullptr; }
 };
 struct native_handle_t { bool alive=true; };
@@ -121,10 +132,18 @@ template<class... T> int native_window_set_buffers_dimensions(T...) { return 0; 
 template<class... T> int native_window_set_buffers_format(T...) { return 0; }
 template<class... T> int native_window_set_usage(T...) { return 0; }
 template<class... T> int native_window_set_crop(T...) { return 0; }
-static int native_window_set_buffer_count(ANativeWindow* window,uint32_t) { check(window!=nullptr,"count window exists"); return 0; }
+static int bufferCountStatus;
+static int native_window_set_buffer_count(ANativeWindow* window,uint32_t) { check(window!=nullptr,"count window exists"); return bufferCountStatus; }
 struct Device {
     BoundaryMutex* mutex=nullptr;
-    Status setPreviewWindow(void*) { check(!mutex->held,"HIDL window call outside mutex"); return Status::OK; }
+    Status windowStatus=Status::OK;
+    bool transport=true;
+    std::function<void()> installHook;
+    hardware::Return<Status> setPreviewWindow(void*) {
+        check(!mutex->held,"HIDL window call outside mutex");
+        if (installHook) installHook();
+        return {windowStatus,transport};
+    }
 };
 struct CameraProviderManager { static int mapToStatusT(Status status) { return status==Status::OK ? 0 : -1; } };
 struct CameraHardwareInterface {
@@ -149,6 +168,7 @@ struct CameraHardwareInterface {
     hardware::Return<Status> enqueueBuffer(uint64_t);
     hardware::Return<Status> cancelBuffer(uint64_t);
     hardware::Return<Status> setBufferCount(uint32_t);
+    hardware::Return<Status> setBuffersGeometry(uint32_t,uint32_t,int);
     status_t setPreviewWindow(const sp<ANativeWindow>&);
 };
 """
@@ -210,7 +230,7 @@ int main() {
 
 
 class PreviewBoundaries(unittest.TestCase):
-    def test_preview_production_methods(self):
+    def compile_case(self, name, cases):
         source = (ROOT / "device1/CameraHardwareInterface.cpp").read_text()
         signatures = [
             "std::pair<bool, uint64_t> CameraHardwareInterface::getBufferIdLocked(",
@@ -221,6 +241,7 @@ class PreviewBoundaries(unittest.TestCase):
             "CameraHardwareInterface::enqueueBuffer(",
             "CameraHardwareInterface::cancelBuffer(",
             "CameraHardwareInterface::setBufferCount(",
+            "CameraHardwareInterface::setBuffersGeometry(",
             "status_t CameraHardwareInterface::setPreviewWindow(",
         ]
         methods = []
@@ -240,9 +261,9 @@ class PreviewBoundaries(unittest.TestCase):
                 )
             )
         output = Path(os.environ["TEST_OUTPUT_DIR"]).resolve(strict=True)
-        fixture = output / "hal1_preview_boundaries.cpp"
-        fixture.write_text(PREFIX + "\n".join(methods) + CASES)
-        binary = output / "hal1_preview_boundaries"
+        fixture = output / (name + ".cpp")
+        fixture.write_text(PREFIX + "\n".join(methods) + cases)
+        binary = output / name
         subprocess.run(
             [
                 "clang++",
@@ -259,6 +280,120 @@ class PreviewBoundaries(unittest.TestCase):
             check=True,
         )
         subprocess.run([str(binary)], check=True)
+
+    def test_preview_production_methods(self):
+        self.compile_case("hal1_preview_boundaries", CASES)
+
+    def test_rejected_preview_restores_surface_maps_and_parameters(self):
+        self.compile_case(
+            "hal1_preview_rollback",
+            r"""
+int main() {
+    CameraHardwareInterface camera;
+    Device device;
+    device.mutex=&camera.mBufferIdMapLock;
+    camera.mHidlDevice=&device;
+    ANativeWindow oldWindow,candidateWindow;
+    oldWindow.mutex=candidateWindow.mutex=&camera.mBufferIdMapLock;
+    native_handle_t oldHandle,candidateHandle;
+    GraphicBuffer oldBuffer{&oldHandle},candidateBuffer{&candidateHandle};
+    camera.setPreviewWindow(&oldWindow);
+    camera.setBuffersGeometry(640,480,1);
+    nextBuffer=&oldBuffer;
+    uint64_t oldId=0,trialId=0;
+    camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+        check(status==Status::OK,"initial buffer"); oldId=id;
+    });
+    uint64_t generation=camera.mBufferGeneration;
+    device.windowStatus=Status::INTERNAL_ERROR;
+    device.installHook=[&]() {
+        camera.setBuffersGeometry(1280,720,2);
+        nextBuffer=&candidateBuffer;
+        camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+            check(status==Status::OK,"candidate callback sees candidate window"); trialId=id;
+        });
+    };
+    check(camera.setPreviewWindow(&candidateWindow)!=OK,"HAL rejection propagated");
+    check(camera.mPreviewWindow.get()==&oldWindow,"rejected window restores old surface");
+    check(camera.mBufferIdMap.count(oldBuffer.handle)==1 && camera.mReversedBufMap.count(oldId)==1,
+          "rejected window restores old maps");
+    check(camera.mPreviewWidth==640 && camera.mPreviewHeight==480 && camera.mPreviewFormat==1,
+          "rejected window restores old parameters");
+    check(camera.mBufferGeneration>generation+1,"rollback advances generation");
+    check(static_cast<Status>(camera.enqueueBuffer(oldId))==Status::OK,"old ID remains usable");
+    check(static_cast<Status>(camera.cancelBuffer(trialId))==Status::ILLEGAL_ARGUMENT,
+          "candidate ID rejected after rollback");
+    device.installHook=nullptr;
+    check(camera.setPreviewWindow(nullptr)!=OK,"null target rejection propagated");
+    check(camera.mPreviewWindow.get()==&oldWindow && camera.mReversedBufMap.count(oldId)==1,
+          "null rejection restores old target and maps");
+    nextBuffer=&oldBuffer;
+    dequeueHook=[&]() { camera.setPreviewWindow(&candidateWindow); };
+    camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+        check(status==Status::INTERNAL_ERROR && id==0,"old inflight dequeue rejected across rollback");
+    });
+    dequeueHook=nullptr;
+    device.transport=false;
+    check(camera.setPreviewWindow(&candidateWindow)==DEAD_OBJECT,"transport failure reported");
+    check(camera.mPreviewWindow.get()==&oldWindow && camera.mReversedBufMap.count(oldId)==1,
+          "transport failure restores old state");
+    device.transport=true;
+    device.windowStatus=Status::OK;
+    camera.setPreviewWindow(&candidateWindow);
+    nextBuffer=&candidateBuffer;
+    camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+        check(status==Status::OK && id>trialId,"candidate buffer IDs remain monotonic");
+    });
+    check(camera.mReversedBufMap.count(oldId)==0,"success discards old map");
+    return failures ? 1 : 0;
+}
+""",
+        )
+
+    def test_count_failure_invalidates_disconnected_slots(self):
+        self.compile_case(
+            "hal1_preview_count_failure",
+            r"""
+int main() {
+    CameraHardwareInterface camera;
+    Device device;
+    device.mutex=&camera.mBufferIdMapLock;
+    camera.mHidlDevice=&device;
+    ANativeWindow window;
+    window.mutex=&camera.mBufferIdMapLock;
+    native_handle_t handle;
+    GraphicBuffer buffer{&handle};
+    nextBuffer=&buffer;
+    camera.setPreviewWindow(&window);
+    uint64_t oldId=0;
+    camera.dequeueBuffer([&](Status,uint64_t id,hidl_handle,uint32_t) { oldId=id; });
+    uint64_t generation=camera.mBufferGeneration;
+    bufferCountStatus=-1;
+    check(static_cast<Status>(camera.setBufferCount(5))==Status::INTERNAL_ERROR,"count failure returned");
+    check(camera.mBufferGeneration>generation && camera.mBufferIdMap.empty() && camera.mReversedBufMap.empty(),
+          "disconnect invalidates maps despite count failure");
+    check(static_cast<Status>(camera.enqueueBuffer(oldId))==Status::ILLEGAL_ARGUMENT,"stale queue ID rejected");
+    check(static_cast<Status>(camera.cancelBuffer(oldId))==Status::ILLEGAL_ARGUMENT,"stale cancel ID rejected");
+    dequeueHook=[&]() { camera.setBufferCount(6); };
+    camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+        check(status==Status::INTERNAL_ERROR && id==0,"count failure rejects inflight dequeue");
+    });
+    dequeueHook=nullptr;
+    bufferCountStatus=0;
+    check(static_cast<Status>(camera.setBufferCount(5))==Status::OK,"count success returned");
+    camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) {
+        check(status==Status::OK && id>oldId,"replacement ID remains monotonic"); oldId=id;
+    });
+    device.windowStatus=Status::INTERNAL_ERROR;
+    check(camera.setPreviewWindow(&window)!=OK,"same target failure reported");
+    check(camera.mReversedBufMap.count(oldId)==1,"unchanged target preserves live maps");
+    device.installHook=[&]() { camera.setBufferCount(5); };
+    check(camera.setPreviewWindow(&window)!=OK,"same target reconfiguration fails");
+    check(camera.mReversedBufMap.empty(),"same target keeps disconnected slots invalid");
+    return failures ? 1 : 0;
+}
+""",
+        )
 
     def test_registration_and_transport_contracts(self):
         source = (ROOT / "device1/CameraHardwareInterface.cpp").read_text()

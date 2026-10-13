@@ -23,6 +23,7 @@
 #include <media/stagefright/MediaBuffer.h>
 #include <camera/android/hardware/ICamera.h>
 #include <camera/ICameraRecordingProxy.h>
+#include <camera/ICameraRecordingProxyListener.h>
 #include <camera/CameraParameters.h>
 #include <gui/BufferItemConsumer.h>
 #include <utils/List.h>
@@ -38,6 +39,17 @@ class Surface;
 
 class CameraSource : public MediaSource, public MediaBufferObserver {
 public:
+    /**
+     * Factory method to create a new CameraSource using the current
+     * settings (such as video size, frame rate, color format, etc)
+     * from the default camera.
+     *
+     * @param clientName The package/process name of the client application.
+     *    This is used for permissions checking.
+     * @return NULL on error.
+     */
+    static CameraSource *Create(const String16 &clientName);
+
     /**
      * Factory method to create a new CameraSource.
      *
@@ -77,7 +89,8 @@ public:
                                           pid_t clientPid,
                                           Size videoSize,
                                           int32_t frameRate,
-                                          const sp<IGraphicBufferProducer>& surface);
+                                          const sp<IGraphicBufferProducer>& surface,
+                                          bool storeMetaDataInVideoBuffers = true);
 
     virtual ~CameraSource();
 
@@ -117,6 +130,26 @@ public:
     virtual void signalBufferReturned(MediaBufferBase* buffer);
 
 protected:
+
+    /**
+     * The class for listening to BnCameraRecordingProxyListener. This is used to receive video
+     * buffers in VIDEO_BUFFER_MODE_DATA_CALLBACK_YUV and VIDEO_BUFFER_MODE_DATA_CALLBACK_METADATA
+     * mode. When a frame is available, CameraSource::dataCallbackTimestamp() will be called.
+     */
+    class ProxyListener: public BnCameraRecordingProxyListener {
+    public:
+        ProxyListener(const sp<CameraSource>& source);
+        virtual void dataCallbackTimestamp(int64_t timestampUs, int32_t msgType,
+                const sp<IMemory> &data);
+        virtual void recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
+                native_handle_t* handle);
+        virtual void recordingFrameHandleCallbackTimestampBatch(
+                const std::vector<int64_t>& timestampsUs,
+                const std::vector<native_handle_t*>& handles);
+
+    private:
+        sp<CameraSource> mSource;
+    };
 
     /**
      * The class for listening to BufferQueue's onFrameAvailable. This is used to receive video
@@ -181,14 +214,31 @@ protected:
     CameraSource(const sp<hardware::ICamera>& camera, const sp<ICameraRecordingProxy>& proxy,
                  int32_t cameraId, const String16& clientName, uid_t clientUid, pid_t clientPid,
                  Size videoSize, int32_t frameRate,
-                 const sp<IGraphicBufferProducer>& surface);
+                 const sp<IGraphicBufferProducer>& surface,
+                 bool storeMetaDataInVideoBuffers);
 
     virtual status_t startCameraRecording();
     virtual void releaseRecordingFrame(const sp<IMemory>& frame);
+    virtual void releaseRecordingFrameHandle(native_handle_t* handle);
+    // stagefright recorder not using this for now
+    virtual void releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>& handles);
 
     // Returns true if need to skip the current frame.
     // Called from dataCallbackTimestamp.
     virtual bool skipCurrentFrame(int64_t /*timestampUs*/) {return false;}
+
+    // Callback called when still camera raw data is available.
+    virtual void dataCallback(int32_t /*msgType*/, const sp<IMemory>& /*data*/) {}
+
+    virtual void dataCallbackTimestamp(int64_t timestampUs, int32_t msgType,
+            const sp<IMemory> &data);
+
+    virtual void recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
+            native_handle_t* handle);
+
+    virtual void recordingFrameHandleCallbackTimestampBatch(
+            const std::vector<int64_t>& timestampsUs,
+            const std::vector<native_handle_t*>& handles);
 
     // Process a buffer item received in BufferQueueListener.
     virtual void processBufferQueueFrame(BufferItem& buffer);
@@ -205,12 +255,25 @@ private:
     List<sp<IMemory> > mFramesBeingEncoded;
     List<int64_t> mFrameTimes;
 
+    // The handle-only camera return ABI pairs handles with callback slots FIFO.
+    // mLock protects delivery order and completion readiness, including drops.
+    struct PendingRecordingHandle {
+        native_handle_t* handle;
+        bool ready;
+    };
+    std::deque<PendingRecordingHandle> mPendingRecordingHandles;
+    void markRecordingFrameReturned(native_handle_t* handle);
+    void returnReadyRecordingFrames();
+
     int64_t mFirstFrameTimeUs;
     int64_t mStopSystemTimeUs;
     int32_t mNumFramesDropped;
     int32_t mNumGlitches;
     int64_t mGlitchDurationThresholdUs;
     bool mCollectStats;
+
+    // The mode video buffers are received from camera. One of VIDEO_BUFFER_MODE_*.
+    int32_t mVideoBufferMode;
 
     static const uint32_t kDefaultVideoBufferCount = 32;
 
@@ -232,25 +295,18 @@ private:
     KeyedVector<ANativeWindowBuffer*, BufferItem> mReceivedBufferItemMap;
     sp<BufferQueueListener> mBufferQueueListener;
 
-    Mutex mBatchLock; // protecting access to mInflightXXXXX members below
-    // Start of members protected by mBatchLock
-    std::deque<uint32_t> mInflightBatchSizes;
-    std::vector<native_handle_t*> mInflightReturnedHandles;
-    std::vector<const sp<IMemory>> mInflightReturnedMemorys;
-    // End of members protected by mBatchLock
-
     void releaseQueuedFrames();
     void releaseOneRecordingFrame(const sp<IMemory>& frame);
     void createVideoBufferMemoryHeap(size_t size, uint32_t bufferCount);
 
     status_t init(const sp<hardware::ICamera>& camera, const sp<ICameraRecordingProxy>& proxy,
                   int32_t cameraId, const String16& clientName, uid_t clientUid, pid_t clientPid,
-                  Size videoSize, int32_t frameRate);
+                  Size videoSize, int32_t frameRate, bool storeMetaDataInVideoBuffers);
 
     status_t initWithCameraAccess(
                   const sp<hardware::ICamera>& camera, const sp<ICameraRecordingProxy>& proxy,
                   int32_t cameraId, const String16& clientName, uid_t clientUid, pid_t clientPid,
-                  Size videoSize, int32_t frameRate);
+                  Size videoSize, int32_t frameRate, bool storeMetaDataInVideoBuffers);
 
     // Initialize the buffer queue used in VIDEO_BUFFER_MODE_BUFFER_QUEUE mode.
     status_t initBufferQueue(uint32_t width, uint32_t height, uint32_t format,

@@ -22,6 +22,7 @@
 #include <utils/Timers.h>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 #include <vector>
 #include <set>
@@ -83,7 +84,11 @@ public:
         if (score == INVALID_ADJ) {
             mScore = UNKNOWN_ADJ;
         } else {
-            mScore = mScoreOffset + score;
+            // Saturation preserves lower priority when a valid offset exceeds int32_t.
+            const int64_t adjustedScore = static_cast<int64_t>(mScoreOffset) + score;
+            mScore = static_cast<int32_t>(std::min<int64_t>(
+                    std::numeric_limits<int32_t>::max(), std::max<int64_t>(
+                            std::numeric_limits<int32_t>::min(), adjustedScore)));
         }
     }
 

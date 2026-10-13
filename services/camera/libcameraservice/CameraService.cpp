@@ -70,6 +70,7 @@
 #include <system/camera.h>
 
 #include "CameraService.h"
+#include "api1/CameraClient.h"
 #include "api1/Camera2Client.h"
 #include "api2/CameraDeviceClient.h"
 #include "utils/CameraTraces.h"
@@ -373,6 +374,13 @@ void CameraService::addStates(const String8 id) {
         ALOGE("Failed to query device kind: %s (%d)", strerror(-res), res);
         return;
     }
+    bool supportsHAL3 = false;
+    binder::Status capability = supportsCameraApi(String16(id),
+            hardware::ICameraService::API_VERSION_2, &supportsHAL3);
+    if (!capability.isOk()) {
+        ALOGE("Failed to query camera API capability for %s", id.string());
+        return;
+    }
     std::set<String8> conflicting;
     for (size_t i = 0; i < cost.conflictingDevices.size(); i++) {
         conflicting.emplace(String8(cost.conflictingDevices[i].c_str()));
@@ -381,7 +389,7 @@ void CameraService::addStates(const String8 id) {
     {
         Mutex::Autolock lock(mCameraStatesLock);
         mCameraStates.emplace(id, std::make_shared<CameraState>(id, cost.resourceCost,
-                                                                conflicting, deviceKind));
+                                                                conflicting, deviceKind, supportsHAL3));
     }
 
     if (mFlashlight->hasFlashUnit(id)) {
@@ -748,17 +756,21 @@ Status CameraService::getCameraCharacteristics(const String16& cameraId,
     status_t res = mCameraProviderManager->getCameraCharacteristics(
             cameraIdStr, overrideForPerfClass, cameraInfo);
     if (res != OK) {
-        if (res == NAME_NOT_FOUND) {
+        // A HAL1 device has no camera2 characteristics, so the provider reports
+        // NAME_NOT_FOUND for it as well; only an ID absent from every provider
+        // is an illegal argument.
+        hardware::hidl_version deviceVersion{0,0};
+        if (res == NAME_NOT_FOUND && mCameraProviderManager->getHighestSupportedVersion(
+                cameraIdStr, &deviceVersion) != OK) {
             return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT, "Unable to retrieve camera "
                     "characteristics for unknown device %s: %s (%d)", String8(cameraId).string(),
                     strerror(-res), res);
-        } else {
-            logServiceError(String8::format("Unable to retrieve camera characteristics for "
-            "device %s.", String8(cameraId).string()),ERROR_INVALID_OPERATION);
-            return STATUS_ERROR_FMT(ERROR_INVALID_OPERATION, "Unable to retrieve camera "
-                    "characteristics for device %s: %s (%d)", String8(cameraId).string(),
-                    strerror(-res), res);
         }
+        logServiceError(String8::format("Unable to retrieve camera characteristics for "
+        "device %s.", String8(cameraId).string()),ERROR_INVALID_OPERATION);
+        return STATUS_ERROR_FMT(ERROR_INVALID_OPERATION, "Unable to retrieve camera "
+                "characteristics for device %s: %s (%d)", String8(cameraId).string(),
+                strerror(-res), res);
     }
     SystemCameraKind deviceKind = SystemCameraKind::PUBLIC;
     if (getSystemCameraKind(String8(cameraId), &deviceKind) != OK) {
@@ -888,16 +900,25 @@ Status CameraService::makeClient(const sp<CameraService>& cameraService,
         const sp<IInterface>& cameraCb, const String16& packageName,
         const std::optional<String16>& featureId,  const String8& cameraId,
         int api1CameraId, int facing, int sensorOrientation, int clientPid, uid_t clientUid,
-        int servicePid, int deviceVersion, apiLevel effectiveApiLevel, bool overrideForPerfClass,
+        int servicePid, int halVersion, int deviceVersion, apiLevel effectiveApiLevel, bool overrideForPerfClass,
         /*out*/sp<BasicClient>* client) {
 
-    // Create CameraClient based on device version reported by the HAL.
-    switch(deviceVersion) {
-        case CAMERA_DEVICE_API_VERSION_1_0:
-            ALOGE("Camera using old HAL version: %d", deviceVersion);
-            return STATUS_ERROR_FMT(ERROR_DEPRECATED_HAL,
-                    "Camera device \"%s\" HAL version %d no longer supported",
-                    cameraId.string(), deviceVersion);
+    if (halVersion == CAMERA_HAL_API_VERSION_UNSPECIFIED || halVersion == deviceVersion) {
+        // Default path: HAL version is unspecified by caller, create CameraClient
+        // based on device version reported by the HAL.
+        switch(deviceVersion) {
+          case CAMERA_DEVICE_API_VERSION_1_0:
+            if (effectiveApiLevel == API_1) {  // Camera1 API route
+                sp<ICameraClient> tmp = static_cast<ICameraClient*>(cameraCb.get());
+                *client = new CameraClient(cameraService, tmp, packageName, featureId,
+                        api1CameraId, facing, sensorOrientation, clientPid, clientUid,
+                        getpid());
+            } else { // Camera2 API route
+                ALOGW("Camera using old HAL version: %d", deviceVersion);
+                return STATUS_ERROR_FMT(ERROR_DEPRECATED_HAL,
+                        "Camera device \"%s\" HAL version %d does not support camera2 API",
+                        cameraId.string(), deviceVersion);
+            }
             break;
         case CAMERA_DEVICE_API_VERSION_3_0:
         case CAMERA_DEVICE_API_VERSION_3_1:
@@ -921,12 +942,43 @@ Status CameraService::makeClient(const sp<CameraService>& cameraService,
                         overrideForPerfClass);
             }
             break;
-        default:
+          default:
             // Should not be reachable
             ALOGE("Unknown camera device HAL version: %d", deviceVersion);
             return STATUS_ERROR_FMT(ERROR_INVALID_OPERATION,
                     "Camera device \"%s\" has unknown HAL version %d",
                     cameraId.string(), deviceVersion);
+        }
+    } else {
+        // A particular HAL version is requested by caller. Create CameraClient
+        // based on the requested HAL version.
+        if (deviceVersion > CAMERA_DEVICE_API_VERSION_1_0 &&
+            halVersion == CAMERA_DEVICE_API_VERSION_1_0) {
+            // Only support higher HAL version device opened as HAL1.0 device.
+            // CameraClient opens the device through the provider's device@1.x
+            // interface, so the provider must list one for this ID beside the
+            // higher-version interface.
+            if (!cameraService->mCameraProviderManager->isValidDevice(cameraId.string(),
+                    /*majorVersion*/ 1)) {
+                ALOGE("Camera device \"%s\" (HAL version %x) has no HAL %x interface",
+                        cameraId.string(), deviceVersion, CAMERA_DEVICE_API_VERSION_1_0);
+                return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT,
+                        "Camera device \"%s\" (HAL version %d) cannot be opened as HAL version %d",
+                        cameraId.string(), deviceVersion, halVersion);
+            }
+            sp<ICameraClient> tmp = static_cast<ICameraClient*>(cameraCb.get());
+            *client = new CameraClient(cameraService, tmp, packageName, featureId,
+                    api1CameraId, facing, sensorOrientation, clientPid, clientUid,
+                    servicePid);
+        } else {
+            // Other combinations (e.g. HAL3.x open as HAL2.x) are not supported yet.
+            ALOGE("Invalid camera HAL version %x: HAL %x device can only be"
+                    " opened as HAL %x device", halVersion, deviceVersion,
+                    CAMERA_DEVICE_API_VERSION_1_0);
+            return STATUS_ERROR_FMT(ERROR_ILLEGAL_ARGUMENT,
+                    "Camera device \"%s\" (HAL version %d) cannot be opened as HAL version %d",
+                    cameraId.string(), deviceVersion, halVersion);
+        }
     }
     return Status::ok();
 }
@@ -1014,6 +1066,7 @@ Status CameraService::initializeShimMetadata(int cameraId) {
     sp<Client> tmp = nullptr;
     if (!(ret = connectHelper<ICameraClient,Client>(
             sp<ICameraClient>{nullptr}, id, cameraId,
+            static_cast<int>(CAMERA_HAL_API_VERSION_UNSPECIFIED),
             internalPackageName, {}, uid, USE_CALLING_PID,
             API_1, /*shimUpdateOnly*/ true, /*oomScoreOffset*/ 0,
             /*targetSdkVersion*/ __ANDROID_API_FUTURE__, /*out*/ tmp)
@@ -1541,8 +1594,76 @@ Status CameraService::connect(
     String8 id = cameraIdIntToStr(api1CameraId);
     sp<Client> client = nullptr;
     ret = connectHelper<ICameraClient,Client>(cameraClient, id, api1CameraId,
+            CAMERA_HAL_API_VERSION_UNSPECIFIED, clientPackageName, {},
+            clientUid, clientPid, API_1, /*shimUpdateOnly*/ false, /*scoreOffset*/ 0, targetSdkVersion, /*out*/client);
+
+    if(!ret.isOk()) {
+        logRejected(id, CameraThreadState::getCallingPid(), String8(clientPackageName),
+                ret.toString8());
+        return ret;
+    }
+
+    *device = client;
+    return ret;
+}
+
+Status CameraService::validateOomScoreOffset(const String8& id,
+        const String16& clientPackageName, int oomScoreOffset) {
+    int callingPid = CameraThreadState::getCallingPid();
+    if (oomScoreOffset < 0) {
+        String8 msg =
+                String8::format("Cannot increase the priority of a client %s pid %d for "
+                        "camera id %s", String8(clientPackageName).string(), callingPid,
+                        id.string());
+        ALOGE("%s: %s", __FUNCTION__, msg.string());
+        return STATUS_ERROR(ERROR_ILLEGAL_ARGUMENT, msg.string());
+    }
+
+    // enforce system camera permissions
+    if (oomScoreOffset > 0 &&
+            !hasPermissionsForSystemCamera(callingPid, CameraThreadState::getCallingUid())) {
+        String8 msg =
+                String8::format("Cannot change the priority of a client %s pid %d for "
+                        "camera id %s without SYSTEM_CAMERA permissions",
+                        String8(clientPackageName).string(), callingPid, id.string());
+        ALOGE("%s: %s", __FUNCTION__, msg.string());
+        return STATUS_ERROR(ERROR_PERMISSION_DENIED, msg.string());
+    }
+
+    return Status::ok();
+}
+
+Status CameraService::connectLegacy(
+        const sp<ICameraClient>& cameraClient,
+        int api1CameraId, int halVersion,
+        const String16& clientPackageName,
+        int clientUid, int clientPid,
+        /*out*/
+        sp<ICamera>* device) {
+    return connectLegacyWithOomScoreOffset(cameraClient, api1CameraId, halVersion,
+            clientPackageName, clientUid, clientPid, /*oomScoreOffset*/ 0, device);
+}
+
+Status CameraService::connectLegacyWithOomScoreOffset(
+        const sp<ICameraClient>& cameraClient,
+        int api1CameraId, int halVersion,
+        const String16& clientPackageName,
+        int clientUid, int clientPid, int oomScoreOffset,
+        /*out*/
+        sp<ICamera>* device) {
+
+    ATRACE_CALL();
+    String8 id = cameraIdIntToStr(api1CameraId);
+
+    Status ret = Status::ok();
+    sp<Client> client = nullptr;
+    ret = validateOomScoreOffset(id, clientPackageName, oomScoreOffset);
+    if (!ret.isOk()) return ret;
+
+    ret = connectHelper<ICameraClient,Client>(cameraClient, id, api1CameraId, halVersion,
             clientPackageName, {}, clientUid, clientPid, API_1,
-            /*shimUpdateOnly*/ false, /*oomScoreOffset*/ 0, targetSdkVersion, /*out*/client);
+            /*shimUpdateOnly*/ false, oomScoreOffset,
+            __ANDROID_API_FUTURE__, /*out*/client);
 
     if(!ret.isOk()) {
         logRejected(id, CameraThreadState::getCallingPid(), String8(clientPackageName),
@@ -1635,28 +1756,12 @@ Status CameraService::connectDevice(
         clientPackageNameAdj = String16(vendorClient.c_str());
     }
 
-    if (oomScoreOffset < 0) {
-        String8 msg =
-                String8::format("Cannot increase the priority of a client %s pid %d for "
-                        "camera id %s", String8(clientPackageNameAdj).string(), callingPid,
-                        id.string());
-        ALOGE("%s: %s", __FUNCTION__, msg.string());
-        return STATUS_ERROR(ERROR_ILLEGAL_ARGUMENT, msg.string());
-    }
-
-    // enforce system camera permissions
-    if (oomScoreOffset > 0 &&
-            !hasPermissionsForSystemCamera(callingPid, CameraThreadState::getCallingUid())) {
-        String8 msg =
-                String8::format("Cannot change the priority of a client %s pid %d for "
-                        "camera id %s without SYSTEM_CAMERA permissions",
-                        String8(clientPackageNameAdj).string(), callingPid, id.string());
-        ALOGE("%s: %s", __FUNCTION__, msg.string());
-        return STATUS_ERROR(ERROR_PERMISSION_DENIED, msg.string());
-    }
+    ret = validateOomScoreOffset(id, clientPackageNameAdj, oomScoreOffset);
+    if (!ret.isOk()) return ret;
 
     ret = connectHelper<hardware::camera2::ICameraDeviceCallbacks,CameraDeviceClient>(cameraCb, id,
-            /*api1CameraId*/-1, clientPackageNameAdj, clientFeatureId,
+            /*api1CameraId*/-1,
+            CAMERA_HAL_API_VERSION_UNSPECIFIED, clientPackageNameAdj, clientFeatureId,
             clientUid, USE_CALLING_PID, API_2, /*shimUpdateOnly*/ false, oomScoreOffset,
             targetSdkVersion, /*out*/client);
 
@@ -1687,7 +1792,7 @@ Status CameraService::connectDevice(
 
 template<class CALLBACK, class CLIENT>
 Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8& cameraId,
-        int api1CameraId, const String16& clientPackageName,
+        int api1CameraId, int halVersion, const String16& clientPackageName,
         const std::optional<String16>& clientFeatureId, int clientUid, int clientPid,
         apiLevel effectiveApiLevel, bool shimUpdateOnly, int oomScoreOffset, int targetSdkVersion,
         /*out*/sp<CLIENT>& device) {
@@ -1697,8 +1802,9 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8&
 
     int originalClientPid = 0;
 
-    ALOGI("CameraService::connect call (PID %d \"%s\", camera ID %s) and "
+    ALOGI("CameraService::connect call (PID %d \"%s\", camera ID %s) for HAL version %s and "
             "Camera API version %d", clientPid, clientName8.string(), cameraId.string(),
+            (halVersion == -1) ? "default" : std::to_string(halVersion).c_str(),
             static_cast<int>(effectiveApiLevel));
 
     nsecs_t openTimeNs = systemTime();
@@ -1784,7 +1890,7 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8&
         if(!(ret = makeClient(this, cameraCb, clientPackageName, clientFeatureId,
                 cameraId, api1CameraId, facing, orientation,
                 clientPid, clientUid, getpid(),
-                deviceVersion, effectiveApiLevel, overrideForPerfClass,
+                halVersion, deviceVersion, effectiveApiLevel, overrideForPerfClass,
                 /*out*/&tmp)).isOk()) {
             return ret;
         }
@@ -3689,9 +3795,10 @@ bool CameraService::SensorPrivacyPolicy::hasCameraPrivacyFeature() {
 // ----------------------------------------------------------------------------
 
 CameraService::CameraState::CameraState(const String8& id, int cost,
-        const std::set<String8>& conflicting, SystemCameraKind systemCameraKind) : mId(id),
+        const std::set<String8>& conflicting, SystemCameraKind systemCameraKind,
+        bool supportsHAL3) : mId(id),
         mStatus(StatusInternal::NOT_PRESENT), mCost(cost), mConflicting(conflicting),
-        mSystemCameraKind(systemCameraKind) {}
+        mSystemCameraKind(systemCameraKind), mSupportsHAL3(supportsHAL3) {}
 
 CameraService::CameraState::~CameraState() {}
 
@@ -3728,6 +3835,10 @@ String8 CameraService::CameraState::getId() const {
 
 SystemCameraKind CameraService::CameraState::getSystemCameraKind() const {
     return mSystemCameraKind;
+}
+
+bool CameraService::CameraState::supportsHAL3() const {
+    return mSupportsHAL3;
 }
 
 bool CameraService::CameraState::addUnavailablePhysicalId(const String8& physicalId) {
@@ -4205,13 +4316,15 @@ void CameraService::updateStatus(StatusInternal status, const String8& cameraId,
         ALOGE("%s: Invalid camera id %s, skipping", __FUNCTION__, cameraId.string());
         return;
     }
+    // DeviceInfo disappears before NOT_PRESENT reaches the service.
+    const bool supportsHAL3 = state->supportsHAL3();
 
     // Collect the logical cameras without holding mStatusLock in updateStatus
     // as that can lead to a deadlock(b/162192331).
     auto logicalCameraIds = getLogicalCameras(cameraId);
     // Update the status for this camera state, then send the onStatusChangedCallbacks to each
     // of the listeners with both the mStatusLock and mStatusListenerLock held
-    state->updateStatus(status, cameraId, rejectSourceStates, [this, &deviceKind,
+    state->updateStatus(status, cameraId, rejectSourceStates, [this, &deviceKind, &supportsHAL3,
                         &logicalCameraIds]
             (const String8& cameraId, StatusInternal status) {
 
@@ -4239,8 +4352,8 @@ void CameraService::updateStatus(StatusInternal status, const String8& cameraId,
                 bool isVendorListener = listener->isVendorListener();
                 if (shouldSkipStatusUpdates(deviceKind, isVendorListener,
                         listener->getListenerPid(), listener->getListenerUid()) ||
-                        isVendorListener) {
-                    ALOGV("Skipping discovery callback for system-only camera device %s",
+                        (isVendorListener && !supportsHAL3)) {
+                    ALOGV("Skipping discovery callback for system-only camera/HAL1 device %s",
                             cameraId.c_str());
                     continue;
                 }

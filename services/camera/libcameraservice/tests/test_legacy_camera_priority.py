@@ -29,9 +29,9 @@ PREFIX = r"""
 #define ATRACE_CALL() ((void)0)
 #define ALOGE(...) ((void)0)
 #define STATUS_ERROR(code, message) ((void)(message), Status{code})
-constexpr int ERROR_ILLEGAL_ARGUMENT=3, ERROR_PERMISSION_DENIED=1;
-constexpr int API_1=1, __ANDROID_API_FUTURE__=10000;
-constexpr int INVALID_ADJ=-10000, UNKNOWN_ADJ=1001;
+inline constexpr int ERROR_ILLEGAL_ARGUMENT=3, ERROR_PERMISSION_DENIED=1;
+inline constexpr int API_1=1, __ANDROID_API_FUTURE__=10000;
+inline constexpr int INVALID_ADJ=-10000, UNKNOWN_ADJ=1001;
 struct String16 {};
 struct String8 {
     String8()=default;

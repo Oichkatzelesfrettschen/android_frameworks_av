@@ -305,6 +305,9 @@ public:
     status_t dump(int fd, const Vector<String16>& /*args*/) const;
 
 private:
+    bool getRecordingFrameSlot(const sp<IMemory>& mem, uint32_t* heapId,
+            uint32_t* bufferIndex);
+
     sp<hardware::camera::device::V1_0::ICameraDevice> mHidlDevice;
     String8 mName;
 

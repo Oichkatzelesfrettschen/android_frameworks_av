@@ -165,6 +165,11 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
         mem = mHidlMemPoolMap.at(data);
     }
     sp<CameraHeapMemory> heapMem(static_cast<CameraHeapMemory *>(mem->handle));
+    if (bufferIndex >= heapMem->mNumBufs ||
+            heapMem->mBufSize < sizeof(VideoNativeHandleMetadata)) {
+        ALOGE("%s: invalid recording metadata buffer", __FUNCTION__);
+        return hardware::Void();
+    }
     // TODO: Using unsecurePointer() has some associated security pitfalls
     //       (see declaration for details).
     //       Either document why it is safe in this case or address the
@@ -191,7 +196,8 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
             sp<CameraHeapMemory> mem(
                     static_cast<CameraHeapMemory *>(mHidlMemPoolMap.at(hidl_msg.data)->handle));
 
-            if (hidl_msg.bufferIndex >= mem->mNumBufs) {
+            if (hidl_msg.bufferIndex >= mem->mNumBufs ||
+                    mem->mBufSize < sizeof(VideoNativeHandleMetadata)) {
                 ALOGE("%s: invalid buffer index %d, max allowed is %d", __FUNCTION__,
                      hidl_msg.bufferIndex, mem->mNumBufs);
                 return hardware::Void();
@@ -207,7 +213,9 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
             msgs.push_back({hidl_msg.timestamp, mem->mBuffers[hidl_msg.bufferIndex]});
         }
     }
-    mDataCbTimestampBatch((int32_t) msgType, msgs, mCbUser);
+    if (mDataCbTimestampBatch != nullptr) {
+        mDataCbTimestampBatch((int32_t) msgType, msgs, mCbUser);
+    }
     return hardware::Void();
 }
 
@@ -576,11 +584,11 @@ int CameraHardwareInterface::recordingEnabled()
     return false;
 }
 
-// The HAL names a recording frame by heap ID and slot index, so the memory
-// must be one whole, slot-aligned region inside its heap. BpMemory returns a
-// null heap for an empty or out-of-bounds region.
-static bool getRecordingFrameSlot(const sp<IMemory>& mem, uint32_t* heapId,
+// The HAL names a recording frame by its registered heap ID and slot index.
+// Match the pool slot size and range before forwarding client-supplied memory.
+bool CameraHardwareInterface::getRecordingFrameSlot(const sp<IMemory>& mem, uint32_t* heapId,
         uint32_t* bufferIndex) {
+    if (mem == nullptr) return false;
     ssize_t offset;
     size_t size;
     sp<IMemoryHeap> heap = mem->getMemory(&offset, &size);
@@ -592,8 +600,20 @@ static bool getRecordingFrameSlot(const sp<IMemory>& mem, uint32_t* heapId,
                 offset, size);
         return false;
     }
-    *heapId = heap->getHeapID();
-    *bufferIndex = static_cast<size_t>(offset) / size;
+    std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+    auto pool = mHidlMemPoolMap.find(heap->getHeapID());
+    if (pool == mHidlMemPoolMap.end()) {
+        ALOGE("%s: recording heap is unregistered", __FUNCTION__);
+        return false;
+    }
+    const auto* registered = static_cast<CameraHeapMemory*>(pool->second->handle);
+    const size_t index = static_cast<size_t>(offset) / size;
+    if (size != registered->mBufSize || index >= registered->mNumBufs) {
+        ALOGE("%s: recording frame differs from its registered slot", __FUNCTION__);
+        return false;
+    }
+    *heapId = pool->first;
+    *bufferIndex = index;
     return true;
 }
 
@@ -630,17 +650,16 @@ void CameraHardwareInterface::releaseRecordingFrameHandle(const sp<IMemory>& mem
 void CameraHardwareInterface::releaseRecordingFrameBatch(const std::vector<sp<IMemory>>& frames)
 {
     ALOGV("%s(%s)", __FUNCTION__, mName.string());
+    if (mHidlDevice == nullptr) return;
     size_t n = frames.size();
     std::vector<VideoFrameMessage> msgs;
     msgs.reserve(n);
     for (auto& mem : frames) {
         if (CC_LIKELY(mHidlDevice != nullptr)) {
-            ssize_t offset;
-            size_t size;
-            sp<IMemoryHeap> heap = mem->getMemory(&offset, &size);
-            if (size == sizeof(VideoNativeHandleMetadata)) {
-                uint32_t heapId = heap->getHeapID();
-                uint32_t bufferIndex = offset / size;
+            uint32_t heapId;
+            uint32_t bufferIndex;
+            if (!getRecordingFrameSlot(mem, &heapId, &bufferIndex)) continue;
+            if (mem->size() == sizeof(VideoNativeHandleMetadata)) {
                 // TODO: Using unsecurePointer() has some associated security pitfalls
                 //       (see declaration for details).
                 //       Either document why it is safe in this case or address the
@@ -762,6 +781,7 @@ status_t CameraHardwareInterface::dump(int fd, const Vector<String16>& /*args*/)
     ALOGV("%s(%s)", __FUNCTION__, mName.string());
     if (CC_LIKELY(mHidlDevice != nullptr)) {
         native_handle_t* handle = native_handle_create(1,0);
+        if (handle == nullptr) return NO_MEMORY;
         handle->data[0] = fd;
         Status s = mHidlDevice->dumpState(handle);
         native_handle_delete(handle);
@@ -776,7 +796,9 @@ void CameraHardwareInterface::sNotifyCb(int32_t msg_type, int32_t ext1,
     ALOGV("%s", __FUNCTION__);
     CameraHardwareInterface *object =
             static_cast<CameraHardwareInterface *>(user);
-    object->mNotifyCb(msg_type, ext1, ext2, object->mCbUser);
+    if (object->mNotifyCb != nullptr) {
+        object->mNotifyCb(msg_type, ext1, ext2, object->mCbUser);
+    }
 }
 
 void CameraHardwareInterface::sDataCb(int32_t msg_type,
@@ -793,7 +815,9 @@ void CameraHardwareInterface::sDataCb(int32_t msg_type,
              index, mem->mNumBufs);
         return;
     }
-    object->mDataCb(msg_type, mem->mBuffers[index], metadata, object->mCbUser);
+    if (object->mDataCb != nullptr) {
+        object->mDataCb(msg_type, mem->mBuffers[index], metadata, object->mCbUser);
+    }
 }
 
 void CameraHardwareInterface::sDataCbTimestamp(nsecs_t timestamp, int32_t msg_type,
@@ -812,7 +836,9 @@ void CameraHardwareInterface::sDataCbTimestamp(nsecs_t timestamp, int32_t msg_ty
              index, mem->mNumBufs);
         return;
     }
-    object->mDataCbTimestamp(timestamp, msg_type, mem->mBuffers[index], object->mCbUser);
+    if (object->mDataCbTimestamp != nullptr) {
+        object->mDataCbTimestamp(timestamp, msg_type, mem->mBuffers[index], object->mCbUser);
+    }
 }
 
 camera_memory_t* CameraHardwareInterface::sGetMemory(

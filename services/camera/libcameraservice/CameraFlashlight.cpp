@@ -524,6 +524,7 @@ status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
     if (res) {
         ALOGE("%s: initializing camera %s failed", __FUNCTION__,
                 cameraId.string());
+        releaseDevice(device, cameraId);
         return res;
     }
 
@@ -580,9 +581,9 @@ status_t CameraHardwareInterfaceFlashControl::disconnectCameraDevice() {
     return OK;
 }
 
-// A successful CameraHardwareInterface::initialize() saves a DeviceMode::CAMERA
-// provider reference through openSession; with no BasicClient to drop it, the
-// flash control removes it once the device is closed.
+// CameraHardwareInterface::initialize() can retain a DeviceMode::CAMERA provider
+// reference even when the HAL rejects open. Flash control owns that reference
+// without a BasicClient and removes it after either failure or device close.
 void CameraHardwareInterfaceFlashControl::releaseDevice(
         const sp<CameraHardwareInterface>& device, const String8& cameraId) {
     device->release();

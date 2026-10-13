@@ -1701,18 +1701,14 @@ status_t CameraProviderManager::ProviderInfo::addDevice(const std::string& name,
 }
 
 void CameraProviderManager::ProviderInfo::removeDevice(std::string id) {
-    for (auto it = mDevices.begin(); it != mDevices.end(); it++) {
-        if ((*it)->mId == id) {
-            mUniqueCameraIds.erase(id);
-            if ((*it)->isAPI1Compatible()) {
-                mUniqueAPI1CompatibleCameraIds.erase(std::remove(
-                        mUniqueAPI1CompatibleCameraIds.begin(),
-                        mUniqueAPI1CompatibleCameraIds.end(), id));
-            }
-            mDevices.erase(it);
-            break;
-        }
-    }
+    // Provider status names one interface; absence removes the logical camera
+    // and every HAL version that shares its public ID.
+    mDevices.erase(std::remove_if(mDevices.begin(), mDevices.end(),
+            [&id](const auto& device) { return device->mId == id; }), mDevices.end());
+    mUniqueCameraIds.erase(id);
+    mUniqueAPI1CompatibleCameraIds.erase(std::remove(
+            mUniqueAPI1CompatibleCameraIds.begin(),
+            mUniqueAPI1CompatibleCameraIds.end(), id), mUniqueAPI1CompatibleCameraIds.end());
 }
 
 status_t CameraProviderManager::ProviderInfo::dump(int fd, const Vector<String16>&) const {

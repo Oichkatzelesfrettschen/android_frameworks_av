@@ -146,7 +146,7 @@ public:
 
     virtual binder::Status     connectLegacy(const sp<hardware::ICameraClient>& cameraClient,
             int32_t cameraId, int32_t halVersion,
-            const String16& clientPackageName, int32_t clientUidclientPid, int clientPid,
+            const String16& clientPackageName, int32_t clientUid, int clientPid,
             /*out*/
             sp<hardware::ICamera>* device);
 

@@ -204,6 +204,7 @@ protected:
                         Camera& operator=(const Camera);
 
     sp<ICameraRecordingProxyListener>  mRecordingProxyListener;
+    bool mRecordingProxyStopped = false;
 
     friend class        CameraBase;
 };

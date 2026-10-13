@@ -185,7 +185,7 @@ status_t CameraClient::unlock() {
     Mutex::Autolock lock(mLock);
 
     // allow anyone to use camera (after they lock the camera)
-    status_t result = checkPid();
+    status_t result = checkPidAndHardware();
     if (result == NO_ERROR) {
         if (mHardware->recordingEnabled()) {
             ALOGE("Not allowed to unlock camera during recording.");
@@ -421,7 +421,10 @@ status_t CameraClient::startPreviewMode() {
                 NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
             mHardware->setPreviewTransform(mOrientation);
         }
-        mHardware->setPreviewWindow(mPreviewWindow);
+        result = mHardware->setPreviewWindow(mPreviewWindow);
+        if (result != NO_ERROR) {
+            return result;
+        }
         result = mHardware->startPreview();
         if (result != NO_ERROR) {
             return result;

@@ -189,7 +189,7 @@ CameraSource *CameraSource::Create(const String16 &clientName) {
 
     sp<hardware::ICamera> camera;
     CameraSource *source = new CameraSource(camera, NULL, 0, clientName,
-            Camera::USE_CALLING_UID, Camera::USE_CALLING_PID, size, -1, NULL, false);
+            Camera::USE_CALLING_UID, Camera::USE_CALLING_PID, size, -1, NULL, true);
     if (source->initCheck() != OK) {
         delete source;
         return NULL;

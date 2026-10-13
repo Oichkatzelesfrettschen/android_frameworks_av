@@ -243,7 +243,9 @@ public:
     /**
      * Release a batch of recording frames previously returned by
      * CAMERA_MSG_VIDEO_FRAME. This method only supports frames that are
-     * stored as VideoNativeHandleMetadata.
+     * stored as VideoNativeHandleMetadata. The method consumes every metadata
+     * handle, including frames whose registered slot or HAL device is unavailable.
+     * The original handles remain owned until the HAL batch call completes.
      *
      * It is camera hal client's responsibility to release video recording
      * frames sent out by the camera hal before the camera hal receives

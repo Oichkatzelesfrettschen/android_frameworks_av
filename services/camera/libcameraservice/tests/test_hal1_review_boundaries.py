@@ -27,6 +27,10 @@ def function(source, signature):
 PREFIX = r"""
 #include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -59,6 +63,7 @@ native_handle_t* native_handle_create(int, int) {
     ++allocations;
     return new native_handle_t;
 }
+int native_handle_close(native_handle_t* handle) { return close(handle->data[0]); }
 int native_handle_delete(native_handle_t* handle) { ++deletions; delete handle; return 0; }
 using Status = int;
 namespace hardware {
@@ -71,8 +76,13 @@ template<class T> struct Return {
 template<> struct Return<void> {};
 Return<void> Void() { return {}; }
 }
+struct VideoFrameMessage;
+static std::function<void(const std::vector<VideoFrameMessage>&)> releaseBatchHook;
 static bool dumpTransportOk=true;
 struct Device {
+    void releaseRecordingFrameHandleBatch(const std::vector<VideoFrameMessage>& messages) {
+        if (releaseBatchHook) releaseBatchHook(messages);
+    }
     hardware::Return<Status> dumpState(native_handle_t* handle) {
         ++dumpCalls; return {handle->data[0],dumpTransportOk};
     }
@@ -83,15 +93,19 @@ struct IMemoryHeap {
     int getHeapID() { return id; }
     size_t getSize() { return bytes; }
 };
-struct VideoNativeHandleMetadata { int type; native_handle_t* pHandle; };
+constexpr int kMetadataBufferTypeNativeHandleSource=3;
+struct VideoNativeHandleMetadata { int eType; native_handle_t* pHandle; };
+static std::function<void()> beforeGetMemory;
 struct IMemory {
     IMemoryHeap* heap = nullptr;
     ssize_t offset = 0;
     size_t bytes = 32;
     VideoNativeHandleMetadata metadata = {};
     sp<IMemoryHeap> getMemory(ssize_t* resultOffset, size_t* resultSize) {
+        if (beforeGetMemory) { auto hook=beforeGetMemory; beforeGetMemory=nullptr; hook(); }
         *resultOffset = offset; *resultSize = bytes; return heap;
     }
+    size_t size() const { return bytes; }
     void* unsecurePointer() { return &metadata; }
 };
 struct camera_memory_t { void* handle; };
@@ -100,8 +114,17 @@ struct camera_frame_metadata_t {};
 using DataCallbackMsg = int;
 struct hidl_handle {
     native_handle_t* handle;
+    hidl_handle(native_handle_t* value=nullptr):handle(value) {}
     native_handle_t* getNativeHandle() const { return handle; }
 };
+struct VideoFrameMessage { hidl_handle frameData; uint32_t data; uint32_t bufferIndex; };
+namespace android { struct HandleTimestampMessage { int64_t timestamp; sp<IMemory> dataPtr; }; }
+namespace hardware {
+template<class T> using hidl_vec=std::vector<T>;
+namespace camera::device::V1_0 {
+struct HandleTimestampMessage { hidl_handle frameData; uint32_t data; uint32_t bufferIndex; int64_t timestamp; };
+}
+}
 struct CameraProviderManager;
 static int initializeResult, retainedReferences, releases, windowResult, surfaceResult;
 struct String8 {
@@ -133,6 +156,9 @@ struct CameraHardwareInterface {
     std::mutex mHidlMemPoolMapLock;
     sp<Device> mHidlDevice;
     void* mCbUser = nullptr;
+    void (*mDataCbTimestampBatch)(int32_t,const std::vector<android::HandleTimestampMessage>&,void*)=nullptr;
+    void releaseRecordingFrameBatch(const std::vector<sp<IMemory>>&);
+    hardware::Return<void> handleCallbackTimestampBatch(DataCallbackMsg,const hardware::hidl_vec<hardware::camera::device::V1_0::HandleTimestampMessage>&);
     void (*mNotifyCb)(int32_t,int32_t,int32_t,void*) = nullptr;
     void (*mDataCb)(int32_t,sp<IMemory>,camera_frame_metadata_t*,void*) = nullptr;
     void (*mDataCbTimestamp)(nsecs_t,int32_t,sp<IMemory>,void*) = nullptr;
@@ -221,8 +247,77 @@ int main() {
     check(callbacks==3,"undersized handle metadata");
     pool.mBufSize=32;
     camera.handleCallbackTimestamp(1,{&frame},7,0,1);
-    check(callbacks==4 && other.metadata.pHandle==&frame,"valid handle callback");
+    check(callbacks==4 && other.metadata.pHandle==&frame &&
+          other.metadata.eType==kMetadataBufferTypeNativeHandleSource,"valid handle metadata type");
+    camera.mDataCbTimestampBatch=[](int32_t,const std::vector<android::HandleTimestampMessage>& messages,void*) {
+        ++callbacks;
+        check(messages.size()==2,"batch callback count");
+        for (const auto& message:messages) {
+            auto* metadata=static_cast<VideoNativeHandleMetadata*>(message.dataPtr->unsecurePointer());
+            check(metadata->eType==kMetadataBufferTypeNativeHandleSource && metadata->pHandle!=nullptr,
+                  "batch metadata type");
+        }
+    };
+    other.metadata.eType=-1; memory.metadata.eType=-1;
+    camera.handleCallbackTimestampBatch(1,{{&frame,7,0,1},{&frame,7,1,2}});
+    check(callbacks==5,"valid batch callback");
+    camera.handleCallbackTimestampBatch(1,{{&frame,7,2,1}});
+    camera.handleCallbackTimestampBatch(1,{{&frame,8,0,1}});
+    pool.mBufSize=1;
+    camera.handleCallbackTimestampBatch(1,{{&frame,7,0,1}});
+    pool.mBufSize=32;
+    check(callbacks==5,"invalid batch rejected");
+    camera.mDataCbTimestampBatch=nullptr;
+    camera.handleCallbackTimestampBatch(1,{{&frame,7,0,1}});
+    check(callbacks==5,"absent batch callback");
     Device device;
+    camera.mHidlDevice=&device;
+    for (int scenario=0; scenario<6; ++scenario) {
+        IMemory first{&heap,0,sizeof(VideoNativeHandleMetadata),{}};
+        IMemory second{&heap,static_cast<ssize_t>(sizeof(VideoNativeHandleMetadata)),sizeof(VideoNativeHandleMetadata),{}};
+        pool.mBufSize=sizeof(VideoNativeHandleMetadata);
+        camera.mHidlMemPoolMap[7]=&registered;
+        camera.mHidlDevice=&device;
+        int descriptors[2]={open("/dev/null",O_RDONLY),open("/dev/null",O_RDONLY)};
+        native_handle_t* originals[2]={native_handle_create(1,0),native_handle_create(1,0)};
+        for (int index=0; index<2; ++index) {
+            check(descriptors[index]>=0,"open batch descriptor");
+            originals[index]->data[0]=descriptors[index];
+        }
+        first.metadata={kMetadataBufferTypeNativeHandleSource,originals[0]};
+        second.metadata={kMetadataBufferTypeNativeHandleSource,originals[1]};
+        int expected=scenario==0 ? 2 : scenario==1 || scenario==4 || scenario==5 ? 1 : 0;
+        if (scenario==1) second.offset=3;
+        if (scenario==2) beforeGetMemory=[&]() { camera.mHidlMemPoolMap.clear(); };
+        if (scenario==3) camera.mHidlDevice=nullptr;
+        if (scenario==4) second.offset=2*sizeof(VideoNativeHandleMetadata);
+        IMemory malformed{&heap,0,1,{}};
+        bool called=false;
+        releaseBatchHook=[&](const std::vector<VideoFrameMessage>& messages) {
+            called=true;
+            check(static_cast<int>(messages.size())==expected,"batch forwards valid slots");
+            for (const auto& message:messages) {
+                auto* handle=message.frameData.getNativeHandle();
+                check(fcntl(handle->data[0],F_GETFD)!=-1,"forwarded original stays open");
+            }
+            // A passthrough HAL can replace shared metadata with its own clone.
+            first.metadata.pHandle=nullptr; second.metadata.pHandle=nullptr;
+        };
+        int deletedBefore=deletions;
+        if (scenario==5) {
+            native_handle_close(originals[1]); native_handle_delete(originals[1]);
+            camera.releaseRecordingFrameBatch({&first,&malformed,nullptr});
+        } else {
+            camera.releaseRecordingFrameBatch({&first,&second});
+        }
+        check(expected==0 || called,"valid batch reaches HAL");
+        check(deletions==deletedBefore+2,"every incoming handle deleted exactly once");
+        for (int descriptor:descriptors) {
+            errno=0;
+            check(fcntl(descriptor,F_GETFD)==-1 && errno==EBADF,"every incoming descriptor closes");
+        }
+    }
+    releaseBatchHook=nullptr;
     camera.mHidlDevice=&device;
     allocationFails=true;
     check(camera.dump(11,{})==NO_MEMORY && dumpCalls==0,"dump allocation failure");
@@ -277,6 +372,8 @@ class Hal1ReviewBoundaries(unittest.TestCase):
             "void CameraHardwareInterface::sDataCb(",
             "void CameraHardwareInterface::sDataCbTimestamp(",
             "hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(",
+            "hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(",
+            "void CameraHardwareInterface::releaseRecordingFrameBatch(",
         )
         extracted = "\n".join(function(source, signature) for signature in signatures)
         extracted += function(

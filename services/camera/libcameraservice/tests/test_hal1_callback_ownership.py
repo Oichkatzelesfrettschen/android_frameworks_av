@@ -35,11 +35,13 @@ PREFIX = r"""
 #define ALOGE(...) ((void)0)
 using DataCallbackMsg=int;
 using nsecs_t=int64_t;
+constexpr int CAMERA_MSG_VIDEO_FRAME=32;
 struct camera_memory_t { void* handle; };
 struct native_handle_t {};
 constexpr int kMetadataBufferTypeNativeHandleSource=3;
 struct VideoNativeHandleMetadata { int eType=0; native_handle_t* pHandle=nullptr; };
-struct Memory { VideoNativeHandleMetadata metadata; void* unsecurePointer() { return &metadata; } };
+struct Memory : std::enable_shared_from_this<Memory> { VideoNativeHandleMetadata metadata; void* unsecurePointer() { return &metadata; } };
+using MemoryBase=Memory;
 struct camera_face_t {};
 struct camera_frame_metadata_t { size_t number_of_faces; camera_face_t* faces; };
 namespace hardware {
@@ -47,7 +49,7 @@ namespace hardware {
     Return<void> Void() { return {}; }
     namespace camera::device::V1_0 { struct CameraFrameMetadata { std::vector<camera_face_t> faces; }; }
 }
-struct hidl_handle { native_handle_t* getNativeHandle() const { return nullptr; } };
+struct hidl_handle { native_handle_t* handle=nullptr; native_handle_t* getNativeHandle() const { return handle; } };
 static std::function<void()> afterUnlock;
 struct BoundaryMutex {
     std::mutex inner;
@@ -60,25 +62,30 @@ template<class T> struct sp {
     sp(T* value):pointer(value->shared_from_this()) {}
     sp& operator=(T* value) { pointer=value->shared_from_this(); return *this; }
     T* operator->() const { return pointer.get(); }
+    bool operator==(std::nullptr_t) const { return pointer==nullptr; }
 };
 static int destroyed, callbacks;
 struct CameraHardwareInterface {
     struct CameraHeapMemory : std::enable_shared_from_this<CameraHeapMemory> {
         size_t mBufSize=sizeof(VideoNativeHandleMetadata);
         unsigned mNumBufs=1;
-        Memory memory;
-        Memory* mBuffers[1]={&memory};
+        std::shared_ptr<Memory> memory=std::make_shared<Memory>();
+        Memory* mBuffers[1]={memory.get()};
+        sp<Memory> getBuffer(uint32_t) { return memory.get(); }
         camera_memory_t handle{this};
         ~CameraHeapMemory() { ++destroyed; }
     };
     BoundaryMutex mHidlMemPoolMapLock;
     std::unordered_map<int,camera_memory_t*> mHidlMemPoolMap;
     static std::shared_ptr<CameraHeapMemory> registrationOwner;
+    void* mCbUser=nullptr;
+    void (*mDataCbTimestamp)(nsecs_t,int32_t,const sp<Memory>&,void*)=nullptr;
     hardware::Return<void> unregisterMemory(uint32_t);
     hardware::Return<void> dataCallback(DataCallbackMsg,uint32_t,uint32_t,
         const hardware::camera::device::V1_0::CameraFrameMetadata&);
     hardware::Return<void> dataCallbackTimestamp(DataCallbackMsg,uint32_t,uint32_t,int64_t);
     hardware::Return<void> handleCallbackTimestamp(DataCallbackMsg,const hidl_handle&,uint32_t,uint32_t,int64_t);
+    void releaseUndeliveredRecordingFrame(uint32_t,uint32_t,const hidl_handle&) {}
     static void sPutMemory(camera_memory_t*) { registrationOwner.reset(); }
     static void sDataCb(int32_t,const camera_memory_t* memory,unsigned,camera_frame_metadata_t*,void*) {
         auto* heap=static_cast<CameraHeapMemory*>(memory->handle);
@@ -105,7 +112,9 @@ int main() {
         };
         if (variant==0) camera.dataCallback(1,7,0,{});
         if (variant==1) camera.dataCallbackTimestamp(1,7,0,1);
-        if (variant==2) camera.handleCallbackTimestamp(1,{},7,0,1);
+        native_handle_t frame;
+        camera.mDataCbTimestamp=[](nsecs_t,int32_t,const sp<Memory>&,void*) { if (destroyed==0) ++callbacks; };
+        if (variant==2) camera.handleCallbackTimestamp(1,{&frame},7,0,1);
         if (!retainedAtUnlock || callbacks!=1 || destroyed!=1 || !camera.mHidlMemPoolMap.empty()) return 1;
     }
     return 0;

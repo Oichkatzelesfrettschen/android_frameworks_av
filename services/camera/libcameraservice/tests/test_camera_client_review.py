@@ -60,9 +60,13 @@ struct IMemory {};
 struct native_handle_t { int descriptor; };
 static int closedHandles, deletedHandles;
 int native_handle_close(native_handle_t* handle) {
+    if (handle==nullptr) return 0;
     assert(close(handle->descriptor)==0); ++closedHandles; return 0;
 }
-int native_handle_delete(native_handle_t* handle) { ++deletedHandles; delete handle; return 0; }
+int native_handle_delete(native_handle_t* handle) {
+    if (handle!=nullptr) { ++deletedHandles; delete handle; }
+    return 0;
+}
 [[maybe_unused]] static native_handle_t* makeHandle(int* peer, int* descriptor) {
     int descriptors[2]; assert(pipe(descriptors)==0);
     *peer=descriptors[1]; *descriptor=descriptors[0];
@@ -119,10 +123,14 @@ struct Camera {
     void recordingFrameHandleCallbackTimestampBatch(const std::vector<nsecs_t>&,
                                                     const std::vector<native_handle_t*>&);
     void releaseRecordingFrame(const sp<IMemory>& value) { if(mCamera) mCamera->releaseRecordingFrame(value); }
-    void releaseRecordingFrameHandle(native_handle_t* value) { if(mCamera) mCamera->releaseRecordingFrameHandle(value); }
-    void releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>& values) {
-        if(mCamera) mCamera->releaseRecordingFrameHandleBatch(values);
-    }
+    void releaseRecordingFrameHandle(native_handle_t*);
+    void releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>);
+    struct RecordingProxy {
+        sp<Camera> mCamera;
+        explicit RecordingProxy(const sp<Camera>& camera):mCamera(camera) {}
+        void releaseRecordingFrameHandle(native_handle_t*);
+        void releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>&);
+    };
 };
 struct IBinder {};
 struct ANativeWindow {};
@@ -272,9 +280,71 @@ class CameraClientReviewTest(unittest.TestCase):
             "void Camera::dataCallbackTimestamp(",
             "void Camera::recordingFrameHandleCallbackTimestamp(",
             "void Camera::recordingFrameHandleCallbackTimestampBatch(",
+            "void Camera::releaseRecordingFrameHandle(",
+            "void Camera::releaseRecordingFrameHandleBatch(",
         ):
             methods += body(source, signature) + "\n"
         self.compile_case("recording-stop", methods + RECORDING)
+
+    def test_recording_returns_consume_handles_after_disconnect(self):
+        source = (SOURCE / "camera/Camera.cpp").read_text()
+        methods = "\n".join(
+            body(source, signature)
+            for signature in (
+                "void Camera::releaseRecordingFrameHandle(",
+                "void Camera::releaseRecordingFrameHandleBatch(",
+                "void Camera::RecordingProxy::releaseRecordingFrameHandle(",
+                "void Camera::RecordingProxy::releaseRecordingFrameHandleBatch(",
+            )
+        )
+        self.compile_case(
+            "recording-return",
+            methods
+            + r"""
+int main() {
+    for (bool proxyReturn : {false,true}) {
+        for (bool connected : {false,true}) {
+            sp<Camera> camera=new Camera;
+            sp<android::hardware::ICamera> endpoint=new android::hardware::ICamera;
+            camera->mCamera=endpoint;
+            Camera::RecordingProxy proxy(camera);
+            int peer,descriptor;
+            auto* handle=makeHandle(&peer,&descriptor);
+            // A frame reaches the client before the camera endpoint disconnects.
+            if (!connected) camera->mCamera.clear();
+            int closedBefore=closedHandles, deletedBefore=deletedHandles;
+            if (proxyReturn) proxy.releaseRecordingFrameHandle(handle);
+            else camera->releaseRecordingFrameHandle(handle);
+            assert(fcntl(descriptor,F_GETFD)==-1 && errno==EBADF);
+            assert(close(peer)==0);
+            assert(closedHandles==closedBefore+1 && deletedHandles==deletedBefore+1);
+            assert(endpoint->handles==(connected?1:0));
+            std::vector<native_handle_t*> handles;
+            std::vector<int> peers,descriptors;
+            for (int index=0;index<2;++index) {
+                handles.push_back(makeHandle(&peer,&descriptor));
+                peers.push_back(peer); descriptors.push_back(descriptor);
+            }
+            closedBefore=closedHandles; deletedBefore=deletedHandles;
+            if (proxyReturn) proxy.releaseRecordingFrameHandleBatch(handles);
+            else camera->releaseRecordingFrameHandleBatch(handles);
+            for (int value:descriptors) assert(fcntl(value,F_GETFD)==-1 && errno==EBADF);
+            for (int value:peers) assert(close(value)==0);
+            assert(closedHandles==closedBefore+2 && deletedHandles==deletedBefore+2);
+            assert(endpoint->batches==(connected?1:0));
+            assert(endpoint->handles==(connected?3:0));
+            camera->mCamera.clear();
+            closedBefore=closedHandles; deletedBefore=deletedHandles;
+            proxy.releaseRecordingFrameHandle(nullptr);
+            camera->releaseRecordingFrameHandle(nullptr);
+            proxy.releaseRecordingFrameHandleBatch({nullptr});
+            camera->releaseRecordingFrameHandleBatch({});
+            assert(closedHandles==closedBefore && deletedHandles==deletedBefore);
+        }
+    }
+}
+""",
+        )
 
     def test_only_documented_hal_sentinel_selects_default(self):
         source = (

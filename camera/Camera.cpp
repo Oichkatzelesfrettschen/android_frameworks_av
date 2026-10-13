@@ -304,16 +304,27 @@ void Camera::releaseRecordingFrameHandle(native_handle_t* handle)
 {
     ALOGV("releaseRecordingFrameHandle");
     sp <::android::hardware::ICamera> c = mCamera;
-    if (c == 0) return;
-    c->releaseRecordingFrameHandle(handle);
+    if (c != nullptr) {
+        c->releaseRecordingFrameHandle(handle);
+    } else {
+        // The caller transfers local handle ownership even after disconnect.
+        native_handle_close(handle);
+        native_handle_delete(handle);
+    }
 }
 
 void Camera::releaseRecordingFrameHandleBatch(
         const std::vector<native_handle_t*> handles) {
     ALOGV("releaseRecordingFrameHandleBatch");
     sp <::android::hardware::ICamera> c = mCamera;
-    if (c == 0) return;
-    c->releaseRecordingFrameHandleBatch(handles);
+    if (c != nullptr) {
+        c->releaseRecordingFrameHandleBatch(handles);
+    } else {
+        for (auto* handle : handles) {
+            native_handle_close(handle);
+            native_handle_delete(handle);
+        }
+    }
 }
 
 // get preview state

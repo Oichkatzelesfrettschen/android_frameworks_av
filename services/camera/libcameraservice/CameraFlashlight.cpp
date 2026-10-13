@@ -343,6 +343,10 @@ status_t CameraHardwareInterfaceFlashControl::setTorchMode(
         const String8& cameraId, bool enabled) {
     Mutex::Autolock l(mLock);
 
+    if (enabled && mTorchEnabled && cameraId == mCameraId) {
+        return OK;
+    }
+
     // pre-check
     status_t res;
     if (enabled) {

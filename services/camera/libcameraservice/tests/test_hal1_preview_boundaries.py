@@ -45,10 +45,14 @@ Return<void> Void() { return {}; }
 }
 static int failures;
 static void check(bool result,const char* name) { if (!result) { ++failures; std::fprintf(stderr,"FAIL: %s\n",name); } }
+static std::function<void()> afterUnlock;
 struct BoundaryMutex {
     bool held=false;
     void lock() { check(!held,"mutex nonrecursive"); held=true; }
-    void unlock() { check(held,"mutex owned"); held=false; }
+    void unlock() {
+        check(held,"mutex owned"); held=false;
+        if (afterUnlock) { auto hook=afterUnlock; afterUnlock=nullptr; hook(); }
+    }
 };
 template<class T> struct sp {
     T* pointer=nullptr;
@@ -59,7 +63,7 @@ template<class T> struct sp {
     bool operator==(const sp& other) const { return pointer==other.pointer; }
     bool operator!=(std::nullptr_t) const { return pointer!=nullptr; }
 };
-struct native_handle_t {};
+struct native_handle_t { bool alive=true; };
 using buffer_handle_t=const native_handle_t*;
 struct hidl_handle {
     buffer_handle_t pointer=nullptr;
@@ -67,6 +71,31 @@ struct hidl_handle {
     hidl_handle(buffer_handle_t value):pointer(value) {}
 };
 struct ANativeWindowBuffer { buffer_handle_t handle; uint32_t stride=8; };
+struct GraphicBuffer;
+template<> struct sp<GraphicBuffer> {
+    GraphicBuffer* pointer=nullptr;
+    sp()=default;
+    sp(GraphicBuffer*);
+    sp(const sp&);
+    sp& operator=(const sp&);
+    ~sp();
+};
+struct GraphicBuffer : ANativeWindowBuffer {
+    int references=1;
+    explicit GraphicBuffer(buffer_handle_t value) { handle=value; }
+    static sp<GraphicBuffer> from(ANativeWindowBuffer* buffer) { return static_cast<GraphicBuffer*>(buffer); }
+    void release() { if (--references==0) const_cast<native_handle_t*>(handle)->alive=false; }
+};
+sp<GraphicBuffer>::sp(GraphicBuffer* value):pointer(value) { if (pointer) ++pointer->references; }
+sp<GraphicBuffer>::sp(const sp& other):sp(other.pointer) {}
+sp<GraphicBuffer>& sp<GraphicBuffer>::operator=(const sp& other) {
+    if (other.pointer) ++other.pointer->references;
+    if (pointer) pointer->release();
+    pointer=other.pointer;
+    return *this;
+}
+sp<GraphicBuffer>::~sp() { if (pointer) pointer->release(); }
+
 struct Crop { int left=-1,top=-1,right=-1,bottom=-1; };
 struct ANativeWindow {
     int queued=0,canceled=0;
@@ -141,7 +170,7 @@ int main() {
     ANativeWindow oldWindow,newWindow;
     oldWindow.mutex=newWindow.mutex=&camera.mBufferIdMapLock;
     native_handle_t handle;
-    ANativeWindowBuffer buffer{&handle,8};
+    GraphicBuffer buffer{&handle};
     nextBuffer=&buffer;
     camera.setPreviewWindow(&oldWindow);
     uint64_t validId=0;
@@ -158,6 +187,23 @@ int main() {
     dequeueHook=[&]() { camera.cleanupCirculatingBuffers(); };
     camera.dequeueBuffer([&](Status status,uint64_t id,hidl_handle,uint32_t) { check(status==Status::INTERNAL_ERROR && id==0,"generation changed during dequeue"); });
     check(newWindow.canceled==1,"same window cancels stale generation");
+
+    dequeueHook=nullptr;
+    camera.setPreviewWindow(&oldWindow);
+    native_handle_t replyHandle;
+    GraphicBuffer replyBuffer{&replyHandle};
+    nextBuffer=&replyBuffer;
+    dequeueHook=[&]() {
+        afterUnlock=[&]() {
+            camera.setPreviewWindow(&newWindow);
+            replyBuffer.release();
+        };
+    };
+    camera.dequeueBuffer([&](Status status,uint64_t,hidl_handle borrowed,uint32_t) {
+        check(status==Status::OK && borrowed.pointer==&replyHandle && borrowed.pointer->alive,
+              "reply retains buffer after slot release");
+    });
+    check(!replyHandle.alive && replyBuffer.references==0,"reply releases final buffer owner");
     return failures ? 1 : 0;
 }
 """

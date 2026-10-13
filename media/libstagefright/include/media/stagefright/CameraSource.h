@@ -255,6 +255,16 @@ private:
     List<sp<IMemory> > mFramesBeingEncoded;
     List<int64_t> mFrameTimes;
 
+    // The handle-only camera return ABI pairs handles with callback slots FIFO.
+    // mLock protects delivery order and completion readiness, including drops.
+    struct PendingRecordingHandle {
+        native_handle_t* handle;
+        bool ready;
+    };
+    std::deque<PendingRecordingHandle> mPendingRecordingHandles;
+    void markRecordingFrameReturned(native_handle_t* handle);
+    void returnReadyRecordingFrames();
+
     int64_t mFirstFrameTimeUs;
     int64_t mStopSystemTimeUs;
     int32_t mNumFramesDropped;
@@ -284,13 +294,6 @@ private:
     // This is protected by mLock.
     KeyedVector<ANativeWindowBuffer*, BufferItem> mReceivedBufferItemMap;
     sp<BufferQueueListener> mBufferQueueListener;
-
-    Mutex mBatchLock; // protecting access to mInflightXXXXX members below
-    // Start of members protected by mBatchLock
-    std::deque<uint32_t> mInflightBatchSizes;
-    std::vector<native_handle_t*> mInflightReturnedHandles;
-    std::vector<const sp<IMemory>> mInflightReturnedMemorys;
-    // End of members protected by mBatchLock
 
     void releaseQueuedFrames();
     void releaseOneRecordingFrame(const sp<IMemory>& frame);

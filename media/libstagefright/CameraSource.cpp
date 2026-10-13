@@ -1006,34 +1006,9 @@ void CameraSource::releaseRecordingFrame(const sp<IMemory>& frame) {
 		     __FUNCTION__, heap->getHeapID(), mMemoryHeapBase->getHeapID());
                 return;
             }
-            uint32_t batchSize = 0;
-            {
-                Mutex::Autolock autoLock(mBatchLock);
-                if (mInflightBatchSizes.size() > 0) {
-                    batchSize = mInflightBatchSizes[0];
-                }
-            }
-            if (batchSize == 0) { // return buffers one by one
-                // Frame contains a VideoNativeHandleMetadata. Send the handle back to camera.
-                releaseRecordingFrameHandle(handle);
-                mMemoryBases.push_back(frame);
-                mMemoryBaseAvailableCond.signal();
-            } else { // Group buffers in batch then return
-                Mutex::Autolock autoLock(mBatchLock);
-                mInflightReturnedHandles.push_back(handle);
-                mInflightReturnedMemorys.push_back(frame);
-                if (mInflightReturnedHandles.size() == batchSize) {
-                    releaseRecordingFrameHandleBatch(mInflightReturnedHandles);
-
-                    mInflightBatchSizes.pop_front();
-                    mInflightReturnedHandles.clear();
-                    for (const auto& mem : mInflightReturnedMemorys) {
-                        mMemoryBases.push_back(mem);
-                        mMemoryBaseAvailableCond.signal();
-                    }
-                    mInflightReturnedMemorys.clear();
-                }
-            }
+            releaseRecordingFrameHandle(handle);
+            mMemoryBases.push_back(frame);
+            mMemoryBaseAvailableCond.signal();
 
         } else if (mCameraRecordingProxy != nullptr) {
             // mCamera is created by application. Return the frame back to camera via camera
@@ -1209,6 +1184,10 @@ bool CameraSource::shouldSkipFrameLocked(int64_t timestampUs) {
 void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
         int32_t msgType __unused, const sp<IMemory> &data) {
     ALOGV("dataCallbackTimestamp: timestamp %lld us", (long long)timestampUs);
+    if (data == nullptr || data->size() == 0 || data->unsecurePointer() == nullptr) {
+        ALOGE("%s: invalid recording memory", __FUNCTION__);
+        return;
+    }
     Mutex::Autolock autoLock(mLock);
 
     if (shouldSkipFrameLocked(timestampUs)) {
@@ -1218,7 +1197,6 @@ void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
 
     ++mNumFramesReceived;
 
-    CHECK(data != NULL && data->size() > 0);
     mFramesReceived.push_back(data);
     int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
     mFrameTimes.push_back(timeUs);
@@ -1227,32 +1205,56 @@ void CameraSource::dataCallbackTimestamp(int64_t timestampUs,
     mFrameAvailableCondition.signal();
 }
 
-void CameraSource::releaseRecordingFrameHandle(native_handle_t* handle) {
-    if (mCameraRecordingProxy != nullptr) {
-        mCameraRecordingProxy->releaseRecordingFrameHandle(handle);
-    } else if (mCamera != nullptr) {
-        int64_t token = IPCThreadState::self()->clearCallingIdentity();
-        mCamera->releaseRecordingFrameHandle(handle);
-        IPCThreadState::self()->restoreCallingIdentity(token);
-    } else {
-        native_handle_close(handle);
-        native_handle_delete(handle);
+void CameraSource::markRecordingFrameReturned(native_handle_t* handle) {
+    for (auto& pending : mPendingRecordingHandles) {
+        if (pending.handle == handle) {
+            pending.ready = true;
+            return;
+        }
     }
+    ALOGE("%s: recording handle is outside the pending delivery queue", __FUNCTION__);
 }
 
-void CameraSource::releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>& handles) {
+void CameraSource::returnReadyRecordingFrames() {
+    std::vector<native_handle_t*> handles;
+    while (!mPendingRecordingHandles.empty() && mPendingRecordingHandles.front().ready) {
+        handles.push_back(mPendingRecordingHandles.front().handle);
+        mPendingRecordingHandles.pop_front();
+    }
+    if (handles.empty()) return;
+
     if (mCameraRecordingProxy != nullptr) {
-        mCameraRecordingProxy->releaseRecordingFrameHandleBatch(handles);
+        if (handles.size() == 1) {
+            mCameraRecordingProxy->releaseRecordingFrameHandle(handles.front());
+        } else {
+            mCameraRecordingProxy->releaseRecordingFrameHandleBatch(handles);
+        }
     } else if (mCamera != nullptr) {
         int64_t token = IPCThreadState::self()->clearCallingIdentity();
-        mCamera->releaseRecordingFrameHandleBatch(handles);
+        if (handles.size() == 1) {
+            mCamera->releaseRecordingFrameHandle(handles.front());
+        } else {
+            mCamera->releaseRecordingFrameHandleBatch(handles);
+        }
         IPCThreadState::self()->restoreCallingIdentity(token);
     } else {
-        for (auto& handle : handles) {
+        for (auto* handle : handles) {
             native_handle_close(handle);
             native_handle_delete(handle);
         }
     }
+}
+
+void CameraSource::releaseRecordingFrameHandle(native_handle_t* handle) {
+    markRecordingFrameReturned(handle);
+    returnReadyRecordingFrames();
+}
+
+void CameraSource::releaseRecordingFrameHandleBatch(const std::vector<native_handle_t*>& handles) {
+    for (auto* handle : handles) {
+        if (handle != nullptr) markRecordingFrameReturned(handle);
+    }
+    returnReadyRecordingFrames();
 }
 
 void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
@@ -1260,13 +1262,14 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
     ALOGV("%s: timestamp %lld us", __FUNCTION__, (long long)timestampUs);
     Mutex::Autolock autoLock(mLock);
     if (handle == nullptr) return;
+    mPendingRecordingHandles.push_back({handle, false});
 
     if (shouldSkipFrameLocked(timestampUs)) {
         releaseRecordingFrameHandle(handle);
         return;
     }
 
-    while (mMemoryBases.empty()) {
+    while (mMemoryBases.empty() && mStarted) {
         if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
                 TIMED_OUT) {
             ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
@@ -1275,6 +1278,10 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
         }
     }
 
+    if (!mStarted) {
+        releaseRecordingFrameHandle(handle);
+        return;
+    }
     ++mNumFramesReceived;
 
     sp<IMemory> data = *mMemoryBases.begin();
@@ -1295,14 +1302,19 @@ void CameraSource::recordingFrameHandleCallbackTimestamp(int64_t timestampUs,
 void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         const std::vector<int64_t>& timestampsUs,
         const std::vector<native_handle_t*>& handles) {
+    Mutex::Autolock autoLock(mLock);
+    // Register the whole delivery before a condition wait admits another callback.
+    for (auto* handle : handles) {
+        if (handle != nullptr) mPendingRecordingHandles.push_back({handle, false});
+    }
     size_t n = timestampsUs.size();
     if (n != handles.size()) {
         ALOGE("%s: timestampsUs(%zu) and handles(%zu) size mismatch!",
                 __FUNCTION__, timestampsUs.size(), handles.size());
+        releaseRecordingFrameHandleBatch(handles);
+        return;
     }
 
-    Mutex::Autolock autoLock(mLock);
-    int batchSize = 0;
     for (size_t i = 0; i < n; i++) {
         int64_t timestampUs = timestampsUs[i];
         native_handle_t* handle = handles[i];
@@ -1318,7 +1330,7 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         // releaseRecordingFrameHandle takes ownership of a dropped handle, so
         // a timed-out frame moves straight to the next batch element.
         bool dropped = false;
-        while (mMemoryBases.empty()) {
+        while (mMemoryBases.empty() && mStarted) {
             if (mMemoryBaseAvailableCond.waitRelative(mLock, kMemoryBaseAvailableTimeoutNs) ==
                     TIMED_OUT) {
                 ALOGW("Waiting on an available memory base timed out. Dropping a recording frame.");
@@ -1328,7 +1340,10 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
             }
         }
         if (dropped) continue;
-        ++batchSize;
+        if (!mStarted) {
+            releaseRecordingFrameHandle(handle);
+            continue;
+        }
         ++mNumFramesReceived;
         sp<IMemory> data = *mMemoryBases.begin();
         mMemoryBases.erase(mMemoryBases.begin());
@@ -1345,15 +1360,9 @@ void CameraSource::recordingFrameHandleCallbackTimestampBatch(
         mFramesReceived.push_back(data);
         int64_t timeUs = mStartTimeUs + (timestampUs - mFirstFrameTimeUs);
         mFrameTimes.push_back(timeUs);
+        mFrameAvailableCondition.signal();
         ALOGV("initial delay: %" PRId64 ", current time stamp: %" PRId64, mStartTimeUs, timeUs);
 
-    }
-    if (batchSize > 0) {
-        Mutex::Autolock autoLock(mBatchLock);
-        mInflightBatchSizes.push_back(batchSize);
-    }
-    for (int i = 0; i < batchSize; i++) {
-        mFrameAvailableCondition.signal();
     }
 }
 

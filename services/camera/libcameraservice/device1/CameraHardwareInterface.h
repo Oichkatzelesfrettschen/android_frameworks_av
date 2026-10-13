@@ -377,8 +377,9 @@ private:
 
     static void sPutMemory(camera_memory_t *data);
 
-    std::pair<bool, uint64_t> getBufferId(ANativeWindowBuffer* anb);
+    std::pair<bool, uint64_t> getBufferIdLocked(ANativeWindowBuffer* anb);
     void cleanupCirculatingBuffers();
+    void cleanupCirculatingBuffersLocked();
 
     /**
      * Implementation of android::hardware::camera::device::V1_0::ICameraDeviceCallback
@@ -432,11 +433,11 @@ private:
 
     sp<ANativeWindow>        mPreviewWindow;
 
-    notify_callback               mNotifyCb;
-    data_callback                 mDataCb;
-    data_callback_timestamp       mDataCbTimestamp;
-    data_callback_timestamp_batch mDataCbTimestampBatch;
-    void *mCbUser;
+    notify_callback               mNotifyCb = nullptr;
+    data_callback                 mDataCb = nullptr;
+    data_callback_timestamp       mDataCbTimestamp = nullptr;
+    data_callback_timestamp_batch mDataCbTimestampBatch = nullptr;
+    void *mCbUser = nullptr;
 
     // Cached values for preview stream parameters
     static const int NOT_SET = -1;
@@ -480,13 +481,14 @@ private:
         }
     };
 
-    std::mutex mBufferIdMapLock; // protecting mBufferIdMap and mNextBufferId
+    std::mutex mBufferIdMapLock; // protects the preview window and both buffer maps
     typedef std::unordered_map<const buffer_handle_t, uint64_t,
             BufferHasher, BufferComparator> BufferIdMap;
     // stream ID -> per stream buffer ID map
     BufferIdMap mBufferIdMap;
     std::unordered_map<uint64_t, ANativeWindowBuffer*> mReversedBufMap;
     uint64_t mNextBufferId = 1;
+    uint64_t mBufferGeneration = 0;
     static const uint64_t BUFFER_ID_NO_BUFFER = 0;
 
     std::mutex mHidlMemPoolMapLock; // protecting mHidlMemPoolMap

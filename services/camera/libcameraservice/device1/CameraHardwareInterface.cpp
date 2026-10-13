@@ -48,6 +48,7 @@ status_t CameraHardwareInterface::initialize(sp<CameraProviderManager> manager) 
 
 status_t CameraHardwareInterface::setPreviewScalingMode(int scalingMode)
 {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     int rc = OK;
     mPreviewScalingMode = scalingMode;
     if (mPreviewWindow != nullptr) {
@@ -58,6 +59,7 @@ status_t CameraHardwareInterface::setPreviewScalingMode(int scalingMode)
 }
 
 status_t CameraHardwareInterface::setPreviewTransform(int transform) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     int rc = OK;
     mPreviewTransform = transform;
     if (mPreviewWindow != nullptr) {
@@ -79,6 +81,10 @@ hardware::Return<void> CameraHardwareInterface::notifyCallback(
 hardware::Return<uint32_t> CameraHardwareInterface::registerMemory(
         const hardware::hidl_handle& descriptor,
         uint32_t bufferSize, uint32_t bufferCount) {
+    if (descriptor.getNativeHandle() == nullptr) {
+        ALOGE("%s: camera memory descriptor is null", __FUNCTION__);
+        return 0;
+    }
     if (descriptor->numFds != 1) {
         ALOGE("%s: camera memory descriptor has numFds %d (expect 1)",
                 __FUNCTION__, descriptor->numFds);
@@ -120,51 +126,50 @@ hardware::Return<void> CameraHardwareInterface::unregisterMemory(uint32_t memId)
 hardware::Return<void> CameraHardwareInterface::dataCallback(
         DataCallbackMsg msgType, uint32_t data, uint32_t bufferIndex,
         const hardware::camera::device::V1_0::CameraFrameMetadata& metadata) {
-    camera_memory_t* mem = nullptr;
+    sp<CameraHeapMemory> heapMem;
     {
         std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
         if (mHidlMemPoolMap.count(data) == 0) {
             ALOGE("%s: memory pool ID %d not found", __FUNCTION__, data);
             return hardware::Void();
         }
-        mem = mHidlMemPoolMap.at(data);
+        heapMem = static_cast<CameraHeapMemory*>(mHidlMemPoolMap.at(data)->handle);
     }
     camera_frame_metadata_t md;
     md.number_of_faces = metadata.faces.size();
     md.faces = (camera_face_t*) metadata.faces.data();
-    sDataCb((int32_t) msgType, mem, bufferIndex, &md, this);
+    sDataCb((int32_t) msgType, &heapMem->handle, bufferIndex, &md, this);
     return hardware::Void();
 }
 
 hardware::Return<void> CameraHardwareInterface::dataCallbackTimestamp(
         DataCallbackMsg msgType, uint32_t data,
         uint32_t bufferIndex, int64_t timestamp) {
-    camera_memory_t* mem = nullptr;
+    sp<CameraHeapMemory> heapMem;
     {
         std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
         if (mHidlMemPoolMap.count(data) == 0) {
             ALOGE("%s: memory pool ID %d not found", __FUNCTION__, data);
             return hardware::Void();
         }
-        mem = mHidlMemPoolMap.at(data);
+        heapMem = static_cast<CameraHeapMemory*>(mHidlMemPoolMap.at(data)->handle);
     }
-    sDataCbTimestamp(timestamp, (int32_t) msgType, mem, bufferIndex, this);
+    sDataCbTimestamp(timestamp, (int32_t) msgType, &heapMem->handle, bufferIndex, this);
     return hardware::Void();
 }
 
 hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
         DataCallbackMsg msgType, const hidl_handle& frameData, uint32_t data,
         uint32_t bufferIndex, int64_t timestamp) {
-    camera_memory_t* mem = nullptr;
+    sp<CameraHeapMemory> heapMem;
     {
         std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
         if (mHidlMemPoolMap.count(data) == 0) {
             ALOGE("%s: memory pool ID %d not found", __FUNCTION__, data);
             return hardware::Void();
         }
-        mem = mHidlMemPoolMap.at(data);
+        heapMem = static_cast<CameraHeapMemory*>(mHidlMemPoolMap.at(data)->handle);
     }
-    sp<CameraHeapMemory> heapMem(static_cast<CameraHeapMemory *>(mem->handle));
     if (bufferIndex >= heapMem->mNumBufs ||
             heapMem->mBufSize < sizeof(VideoNativeHandleMetadata)) {
         ALOGE("%s: invalid recording metadata buffer", __FUNCTION__);
@@ -177,7 +182,7 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
     VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
             heapMem->mBuffers[bufferIndex]->unsecurePointer();
     md->pHandle = const_cast<native_handle_t*>(frameData.getNativeHandle());
-    sDataCbTimestamp(timestamp, (int32_t) msgType, mem, bufferIndex, this);
+    sDataCbTimestamp(timestamp, (int32_t) msgType, &heapMem->handle, bufferIndex, this);
     return hardware::Void();
 }
 
@@ -219,10 +224,8 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
     return hardware::Void();
 }
 
-std::pair<bool, uint64_t> CameraHardwareInterface::getBufferId(
+std::pair<bool, uint64_t> CameraHardwareInterface::getBufferIdLocked(
         ANativeWindowBuffer* anb) {
-    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
-
     buffer_handle_t& buf = anb->handle;
     auto it = mBufferIdMap.find(buf);
     if (it == mBufferIdMap.end()) {
@@ -237,15 +240,28 @@ std::pair<bool, uint64_t> CameraHardwareInterface::getBufferId(
 
 void CameraHardwareInterface::cleanupCirculatingBuffers() {
     std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+    cleanupCirculatingBuffersLocked();
+}
+
+void CameraHardwareInterface::cleanupCirculatingBuffersLocked() {
+    ++mBufferGeneration;
     mBufferIdMap.clear();
     mReversedBufMap.clear();
 }
 
 hardware::Return<void>
 CameraHardwareInterface::dequeueBuffer(dequeueBuffer_cb _hidl_cb) {
-    ANativeWindow *a = mPreviewWindow.get();
+    sp<ANativeWindow> window;
+    uint64_t generation;
+    {
+        std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+        window = mPreviewWindow;
+        generation = mBufferGeneration;
+    }
+    ANativeWindow *a = window.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
+        _hidl_cb(Status::INTERNAL_ERROR, 0, nullptr, 0);
         return hardware::Void();
     }
     ANativeWindowBuffer* anb;
@@ -255,11 +271,16 @@ CameraHardwareInterface::dequeueBuffer(dequeueBuffer_cb _hidl_cb) {
     uint32_t stride = 0;
     hidl_handle buf = nullptr;
     if (rc == OK) {
-        s = Status::OK;
-        auto pair = getBufferId(anb);
-        buf = (pair.first) ? anb->handle : nullptr;
-        bufferId = pair.second;
-        stride = anb->stride;
+        std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+        if (window == mPreviewWindow && generation == mBufferGeneration) {
+            s = Status::OK;
+            auto pair = getBufferIdLocked(anb);
+            buf = (pair.first) ? anb->handle : nullptr;
+            bufferId = pair.second;
+            stride = anb->stride;
+        } else {
+            a->cancelBuffer(a, anb, -1);
+        }
     }
 
     _hidl_cb(s, bufferId, buf, stride);
@@ -268,6 +289,7 @@ CameraHardwareInterface::dequeueBuffer(dequeueBuffer_cb _hidl_cb) {
 
 hardware::Return<Status>
 CameraHardwareInterface::enqueueBuffer(uint64_t bufferId) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
@@ -286,6 +308,7 @@ CameraHardwareInterface::enqueueBuffer(uint64_t bufferId) {
 
 hardware::Return<Status>
 CameraHardwareInterface::cancelBuffer(uint64_t bufferId) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
@@ -304,8 +327,10 @@ CameraHardwareInterface::cancelBuffer(uint64_t bufferId) {
 
 hardware::Return<Status>
 CameraHardwareInterface::setBufferCount(uint32_t count) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
-    if (a != nullptr) {
+    if (a == nullptr) return Status::INTERNAL_ERROR;
+    {
         // Workaround for b/27039775
         // Previously, setting the buffer count would reset the buffer
         // queue's flag that allows for all buffers to be dequeued on the
@@ -342,7 +367,7 @@ CameraHardwareInterface::setBufferCount(uint32_t count) {
     }
     int rc = native_window_set_buffer_count(a, count);
     if (rc == OK) {
-        cleanupCirculatingBuffers();
+        cleanupCirculatingBuffersLocked();
         return Status::OK;
     }
     return Status::INTERNAL_ERROR;
@@ -351,6 +376,7 @@ CameraHardwareInterface::setBufferCount(uint32_t count) {
 hardware::Return<Status>
 CameraHardwareInterface::setBuffersGeometry(
         uint32_t w, uint32_t h, hardware::graphics::common::V1_0::PixelFormat format) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     Status s = Status::INTERNAL_ERROR;
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
@@ -365,7 +391,7 @@ CameraHardwareInterface::setBuffersGeometry(
         rc = native_window_set_buffers_format(a, mPreviewFormat);
     }
     if (rc == OK) {
-        cleanupCirculatingBuffers();
+        cleanupCirculatingBuffersLocked();
         s = Status::OK;
     }
     return s;
@@ -374,6 +400,7 @@ CameraHardwareInterface::setBuffersGeometry(
 hardware::Return<Status>
 CameraHardwareInterface::setCrop(int32_t left, int32_t top, int32_t right, int32_t bottom) {
     Status s = Status::INTERNAL_ERROR;
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
@@ -392,6 +419,7 @@ CameraHardwareInterface::setCrop(int32_t left, int32_t top, int32_t right, int32
 
 hardware::Return<Status>
 CameraHardwareInterface::setUsage(hardware::graphics::common::V1_0::BufferUsage usage) {
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     Status s = Status::INTERNAL_ERROR;
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
@@ -401,7 +429,7 @@ CameraHardwareInterface::setUsage(hardware::graphics::common::V1_0::BufferUsage 
     mPreviewUsage = static_cast<uint64_t> (usage);
     int rc = native_window_set_usage(a, mPreviewUsage);
     if (rc == OK) {
-        cleanupCirculatingBuffers();
+        cleanupCirculatingBuffersLocked();
         s = Status::OK;
     }
     return s;
@@ -410,6 +438,7 @@ CameraHardwareInterface::setUsage(hardware::graphics::common::V1_0::BufferUsage 
 hardware::Return<Status>
 CameraHardwareInterface::setSwapInterval(int32_t interval) {
     Status s = Status::INTERNAL_ERROR;
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
@@ -425,9 +454,15 @@ CameraHardwareInterface::setSwapInterval(int32_t interval) {
 
 hardware::Return<void>
 CameraHardwareInterface::getMinUndequeuedBufferCount(getMinUndequeuedBufferCount_cb _hidl_cb) {
-    ANativeWindow *a = mPreviewWindow.get();
+    sp<ANativeWindow> window;
+    {
+        std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+        window = mPreviewWindow;
+    }
+    ANativeWindow *a = window.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
+        _hidl_cb(Status::INTERNAL_ERROR, 0);
         return hardware::Void();
     }
     int count = 0;
@@ -443,6 +478,7 @@ CameraHardwareInterface::getMinUndequeuedBufferCount(getMinUndequeuedBufferCount
 hardware::Return<Status>
 CameraHardwareInterface::setTimestamp(int64_t timestamp) {
     Status s = Status::INTERNAL_ERROR;
+    std::lock_guard<std::mutex> lock(mBufferIdMapLock);
     ANativeWindow *a = mPreviewWindow.get();
     if (a == nullptr) {
         ALOGE("%s: preview window is null", __FUNCTION__);
@@ -459,7 +495,11 @@ status_t CameraHardwareInterface::setPreviewWindow(const sp<ANativeWindow>& buf)
 {
     ALOGV("%s(%s) buf %p", __FUNCTION__, mName.string(), buf.get());
     if (CC_LIKELY(mHidlDevice != nullptr)) {
-        mPreviewWindow = buf;
+        {
+            std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+            cleanupCirculatingBuffersLocked();
+            mPreviewWindow = buf;
+        }
         if (buf != nullptr) {
             if (mPreviewScalingMode != NOT_SET) {
                 setPreviewScalingMode(mPreviewScalingMode);
@@ -783,9 +823,10 @@ status_t CameraHardwareInterface::dump(int fd, const Vector<String16>& /*args*/)
         native_handle_t* handle = native_handle_create(1,0);
         if (handle == nullptr) return NO_MEMORY;
         handle->data[0] = fd;
-        Status s = mHidlDevice->dumpState(handle);
+        hardware::Return<Status> status = mHidlDevice->dumpState(handle);
         native_handle_delete(handle);
-        return CameraProviderManager::mapToStatusT(s);
+        if (!status.isOk()) return DEAD_OBJECT;
+        return CameraProviderManager::mapToStatusT(status);
     }
     return OK; // It's fine if the HAL doesn't implement dump()
 }

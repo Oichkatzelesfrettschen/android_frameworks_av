@@ -40,7 +40,7 @@ PREFIX = r"""
 #define CC_LIKELY(value) (value)
 using status_t = int;
 using nsecs_t = int64_t;
-constexpr int OK = 0, NO_MEMORY = -12;
+constexpr int OK = 0, NO_MEMORY = -12, DEAD_OBJECT = -32;
 struct String16 {};
 template<class T> using Vector = std::vector<T>;
 template<class T> struct sp {
@@ -61,7 +61,22 @@ native_handle_t* native_handle_create(int, int) {
 }
 int native_handle_delete(native_handle_t* handle) { ++deletions; delete handle; return 0; }
 using Status = int;
-struct Device { Status dumpState(native_handle_t* handle) { ++dumpCalls; return handle->data[0]; } };
+namespace hardware {
+template<class T> struct Return {
+    T value; bool okay=true;
+    Return(T data,bool success=true):value(data),okay(success) {}
+    bool isOk() const { return okay; }
+    operator T() const { return value; }
+};
+template<> struct Return<void> {};
+Return<void> Void() { return {}; }
+}
+static bool dumpTransportOk=true;
+struct Device {
+    hardware::Return<Status> dumpState(native_handle_t* handle) {
+        ++dumpCalls; return {handle->data[0],dumpTransportOk};
+    }
+};
 struct IMemoryHeap {
     int id = 7;
     size_t bytes = 128;
@@ -81,7 +96,7 @@ struct IMemory {
 };
 struct camera_memory_t { void* handle; };
 struct camera_frame_metadata_t {};
-namespace hardware { template<class T> struct Return {}; Return<void> Void() { return {}; } }
+
 using DataCallbackMsg = int;
 struct hidl_handle {
     native_handle_t* handle;
@@ -112,6 +127,7 @@ struct CameraHardwareInterface {
         size_t mBufSize = 32;
         unsigned mNumBufs = 2;
         sp<IMemory> mBuffers[2];
+        camera_memory_t handle{this};
     };
     std::unordered_map<int, camera_memory_t*> mHidlMemPoolMap;
     std::mutex mHidlMemPoolMapLock;
@@ -212,6 +228,8 @@ int main() {
     check(camera.dump(11,{})==NO_MEMORY && dumpCalls==0,"dump allocation failure");
     allocationFails=false;
     check(camera.dump(11,{})==11 && dumpCalls==1 && allocations==deletions,"dump ownership");
+    dumpTransportOk=false;
+    check(camera.dump(11,{})==DEAD_OBJECT && allocations==deletions,"dump transport cleanup");
     CameraProviderManager::ProviderInfo provider;
     for (const char* value : {"0","0","1"}) {
         provider.mDevices.push_back(std::make_unique<CameraProviderManager::ProviderInfo::DeviceInfo>(

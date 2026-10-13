@@ -2392,7 +2392,8 @@ CameraProviderManager::ProviderInfo::DeviceInfo1::DeviceInfo1(const std::string&
     ret = interface->close();
     if (!ret.isOk()) {
         ALOGE("%s: Transaction error closing camera device %s after check for a flash unit: %s",
-                __FUNCTION__, id.c_str(), status.description().c_str());
+                __FUNCTION__, id.c_str(), ret.description().c_str());
+        res = DEAD_OBJECT;
     }
 
     if (res != OK) {

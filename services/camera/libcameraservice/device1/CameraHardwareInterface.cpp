@@ -270,9 +270,12 @@ CameraHardwareInterface::dequeueBuffer(dequeueBuffer_cb _hidl_cb) {
     uint64_t bufferId = 0;
     uint32_t stride = 0;
     hidl_handle buf = nullptr;
+    sp<GraphicBuffer> retainedBuffer;
     if (rc == OK) {
         std::lock_guard<std::mutex> lock(mBufferIdMapLock);
         if (window == mPreviewWindow && generation == mBufferGeneration) {
+            // Surface disconnect can release its slots before HIDL serializes the reply.
+            retainedBuffer = GraphicBuffer::from(anb);
             s = Status::OK;
             auto pair = getBufferIdLocked(anb);
             buf = (pair.first) ? anb->handle : nullptr;

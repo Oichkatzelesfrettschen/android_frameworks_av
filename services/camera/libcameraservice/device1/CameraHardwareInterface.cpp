@@ -349,6 +349,7 @@ CameraHardwareInterface::setBufferCount(uint32_t count) {
         // actually causing memory reallocation, which may not have happened
         // in the past.
         native_window_api_disconnect(a, NATIVE_WINDOW_API_CAMERA);
+        cleanupCirculatingBuffersLocked();
         native_window_api_connect(a, NATIVE_WINDOW_API_CAMERA);
         if (mPreviewScalingMode != NOT_SET) {
             native_window_set_scaling_mode(a, mPreviewScalingMode);
@@ -373,7 +374,6 @@ CameraHardwareInterface::setBufferCount(uint32_t count) {
     }
     int rc = native_window_set_buffer_count(a, count);
     if (rc == OK) {
-        cleanupCirculatingBuffersLocked();
         return Status::OK;
     }
     return Status::INTERNAL_ERROR;
@@ -501,10 +501,33 @@ status_t CameraHardwareInterface::setPreviewWindow(const sp<ANativeWindow>& buf)
 {
     ALOGV("%s(%s) buf %p", __FUNCTION__, mName.string(), buf.get());
     if (CC_LIKELY(mHidlDevice != nullptr)) {
+        struct PreviewState {
+            sp<ANativeWindow> window;
+            decltype(mBufferIdMap) bufferIds;
+            decltype(mReversedBufMap) reversedBuffers;
+            int scalingMode, transform, width, height, format, swapInterval;
+            uint64_t usage;
+            decltype(mPreviewCrop) crop;
+        } previous = {};
+        bool replacingWindow;
         {
             std::lock_guard<std::mutex> lock(mBufferIdMapLock);
-            cleanupCirculatingBuffersLocked();
-            mPreviewWindow = buf;
+            replacingWindow = mPreviewWindow != buf;
+            if (replacingWindow) {
+                previous.window = mPreviewWindow;
+                previous.bufferIds.swap(mBufferIdMap);
+                previous.reversedBuffers.swap(mReversedBufMap);
+                previous.scalingMode = mPreviewScalingMode;
+                previous.transform = mPreviewTransform;
+                previous.width = mPreviewWidth;
+                previous.height = mPreviewHeight;
+                previous.format = mPreviewFormat;
+                previous.swapInterval = mPreviewSwapInterval;
+                previous.usage = mPreviewUsage;
+                previous.crop = mPreviewCrop;
+                cleanupCirculatingBuffersLocked();
+                mPreviewWindow = buf;
+            }
         }
         if (buf != nullptr) {
             if (mPreviewScalingMode != NOT_SET) {
@@ -514,8 +537,29 @@ status_t CameraHardwareInterface::setPreviewWindow(const sp<ANativeWindow>& buf)
                 setPreviewTransform(mPreviewTransform);
             }
         }
-        return CameraProviderManager::mapToStatusT(
-                mHidlDevice->setPreviewWindow(buf.get() ? this : nullptr));
+        // CameraClient serializes target changes; HAL callbacks need the proposed
+        // window while the installation call executes outside the buffer-map lock.
+        auto result = mHidlDevice->setPreviewWindow(buf.get() ? this : nullptr);
+        status_t status = result.isOk()
+                ? CameraProviderManager::mapToStatusT(result) : DEAD_OBJECT;
+        if (status != OK && replacingWindow) {
+            std::lock_guard<std::mutex> lock(mBufferIdMapLock);
+            // Advance the generation to reject dequeues from the rejected target.
+            // Keep mNextBufferId monotonic so a rejected ID cannot name an old slot.
+            cleanupCirculatingBuffersLocked();
+            mPreviewWindow = previous.window;
+            mBufferIdMap.swap(previous.bufferIds);
+            mReversedBufMap.swap(previous.reversedBuffers);
+            mPreviewScalingMode = previous.scalingMode;
+            mPreviewTransform = previous.transform;
+            mPreviewWidth = previous.width;
+            mPreviewHeight = previous.height;
+            mPreviewFormat = previous.format;
+            mPreviewSwapInterval = previous.swapInterval;
+            mPreviewUsage = previous.usage;
+            mPreviewCrop = previous.crop;
+        }
+        return status;
     }
     return INVALID_OPERATION;
 }

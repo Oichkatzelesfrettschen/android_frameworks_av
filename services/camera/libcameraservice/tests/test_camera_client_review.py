@@ -37,7 +37,7 @@ PREFIX = r"""
 #define LOG1(...) ((void)0)
 using nsecs_t = int64_t;
 using status_t = int;
-constexpr int NO_ERROR=0, NO_INIT=-19, NATIVE_WINDOW_API_CAMERA=1, NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW=1;
+inline constexpr int NO_ERROR=0, NO_INIT=-19, NATIVE_WINDOW_API_CAMERA=1, NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW=1;
 template<class T> class sp : public std::shared_ptr<T> {
 public:
     using std::shared_ptr<T>::shared_ptr;
@@ -58,7 +58,7 @@ struct Mutex { std::mutex value; struct Autolock {
 }; };
 struct IMemory {};
 struct native_handle_t { int descriptor; };
-static int closedHandles, deletedHandles;
+[[maybe_unused]] static int closedHandles, deletedHandles;
 int native_handle_close(native_handle_t* handle) {
     if (handle==nullptr) return 0;
     assert(close(handle->descriptor)==0); ++closedHandles; return 0;

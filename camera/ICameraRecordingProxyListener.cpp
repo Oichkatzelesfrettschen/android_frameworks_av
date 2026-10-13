@@ -106,9 +106,25 @@ status_t BnCameraRecordingProxyListener::onTransact(
         case DATA_CALLBACK_TIMESTAMP: {
             ALOGV("DATA_CALLBACK_TIMESTAMP");
             CHECK_INTERFACE(ICameraRecordingProxyListener, data, reply);
-            nsecs_t timestamp = data.readInt64();
-            int32_t msgType = data.readInt32();
-            sp<IMemory> imageData = interface_cast<IMemory>(data.readStrongBinder());
+            nsecs_t timestamp;
+            int32_t msgType;
+            sp<IBinder> memoryBinder;
+            if (data.readInt64(&timestamp) != OK || data.readInt32(&msgType) != OK ||
+                    data.readStrongBinder(&memoryBinder) != OK || memoryBinder == nullptr) {
+                return BAD_VALUE;
+            }
+            sp<IMemory> imageData = interface_cast<IMemory>(memoryBinder);
+            if (imageData == nullptr) return BAD_VALUE;
+            ssize_t offset = 0;
+            size_t size = 0;
+            sp<IMemoryHeap> heap = imageData->getMemory(&offset, &size);
+            if (heap == nullptr || offset < 0 || size == 0) return BAD_VALUE;
+            const size_t heapSize = heap->getSize();
+            if (size > heapSize || static_cast<size_t>(offset) > heapSize - size ||
+                    heap->getHeapID() < 0 || heap->getBase() == MAP_FAILED ||
+                    heap->getBase() == nullptr) {
+                return BAD_VALUE;
+            }
             dataCallbackTimestamp(timestamp, msgType, imageData);
             return NO_ERROR;
         } break;

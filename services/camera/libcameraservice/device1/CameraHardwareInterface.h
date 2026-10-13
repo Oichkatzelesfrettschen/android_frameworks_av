@@ -18,6 +18,7 @@
 #define ANDROID_HARDWARE_CAMERA_HARDWARE_INTERFACE_H
 
 #include <unordered_map>
+#include <new>
 #include <binder/IMemory.h>
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
@@ -334,7 +335,7 @@ private:
                          mBufSize(buf_size),
                          mNumBufs(num_buffers)
         {
-            mHeap = new MemoryHeapBase(fd, buf_size * num_buffers);
+            mHeap = new (std::nothrow) MemoryHeapBase(fd, buf_size * num_buffers);
             commonInitialization();
         }
 
@@ -342,34 +343,27 @@ private:
                                   mBufSize(buf_size),
                                   mNumBufs(num_buffers)
         {
-            mHeap = new MemoryHeapBase(buf_size * num_buffers);
+            mHeap = new (std::nothrow) MemoryHeapBase(buf_size * num_buffers);
             commonInitialization();
         }
 
         void commonInitialization()
         {
-            handle.data = mHeap->base();
+            handle.data = mHeap != nullptr ? mHeap->base() : nullptr;
             handle.size = mBufSize * mNumBufs;
             handle.handle = this;
-
-            mBuffers = new sp<MemoryBase>[mNumBufs];
-            for (uint_t i = 0; i < mNumBufs; i++)
-                mBuffers[i] = new MemoryBase(mHeap,
-                                             i * mBufSize,
-                                             mBufSize);
-
             handle.release = sPutMemory;
         }
 
-        virtual ~CameraHeapMemory()
-        {
-            delete [] mBuffers;
+        sp<MemoryBase> getBuffer(uint32_t index) const {
+            if (index >= mNumBufs) return nullptr;
+            // A callback owns its slot wrapper; registration uses constant space.
+            return new (std::nothrow) MemoryBase(mHeap, index * mBufSize, mBufSize);
         }
 
         size_t mBufSize;
         uint_t mNumBufs;
         sp<MemoryHeapBase> mHeap;
-        sp<MemoryBase> *mBuffers;
 
         camera_memory_t handle;
     };
@@ -378,6 +372,9 @@ private:
                                          void *user __attribute__((unused)));
 
     static void sPutMemory(camera_memory_t *data);
+    void releaseMemoryPools();
+    void releaseUndeliveredRecordingFrame(uint32_t poolId, uint32_t bufferIndex,
+            const hardware::hidl_handle& frame);
 
     std::pair<bool, uint64_t> getBufferIdLocked(ANativeWindowBuffer* anb);
     void cleanupCirculatingBuffers();
@@ -495,6 +492,7 @@ private:
 
     std::mutex mHidlMemPoolMapLock; // protecting mHidlMemPoolMap
     std::unordered_map<int, camera_memory_t*> mHidlMemPoolMap;
+    bool mMemoryRegistrationClosed = false; // protected by mHidlMemPoolMapLock
 };
 
 };  // namespace android

@@ -32,6 +32,7 @@ PREFIX = r"""
 #include <unistd.h>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -45,6 +46,7 @@ PREFIX = r"""
 using status_t = int;
 using nsecs_t = int64_t;
 constexpr int OK = 0, NO_MEMORY = -12, DEAD_OBJECT = -32;
+constexpr int CAMERA_MSG_VIDEO_FRAME=32;
 struct String16 {};
 template<class T> using Vector = std::vector<T>;
 template<class T> struct sp {
@@ -73,13 +75,29 @@ template<class T> struct Return {
     bool isOk() const { return okay; }
     operator T() const { return value; }
 };
-template<> struct Return<void> {};
+template<> struct Return<void> {
+    bool success=true;
+    mutable bool checked=false;
+    bool isOk() const { checked=true; return success; }
+    ~Return() { if (!success && !checked) std::abort(); }
+};
 Return<void> Void() { return {}; }
 }
 struct VideoFrameMessage;
 static std::function<void(const std::vector<VideoFrameMessage>&)> releaseBatchHook;
 static bool dumpTransportOk=true;
+struct hidl_handle;
+static std::function<void(uint32_t,uint32_t,bool)> frameReturnHook;
+static bool frameReturnTransport=true;
 struct Device {
+    hardware::Return<void> releaseRecordingFrame(uint32_t pool,uint32_t index) {
+        if (frameReturnHook) frameReturnHook(pool,index,false);
+        return {frameReturnTransport};
+    }
+    hardware::Return<void> releaseRecordingFrameHandle(uint32_t pool,uint32_t index,const hidl_handle&) {
+        if (frameReturnHook) frameReturnHook(pool,index,true);
+        return {frameReturnTransport};
+    }
     void releaseRecordingFrameHandleBatch(const std::vector<VideoFrameMessage>& messages) {
         if (releaseBatchHook) releaseBatchHook(messages);
     }
@@ -108,6 +126,7 @@ struct IMemory {
     size_t size() const { return bytes; }
     void* unsecurePointer() { return &metadata; }
 };
+using MemoryBase=IMemory;
 struct camera_memory_t { void* handle; };
 struct camera_frame_metadata_t {};
 
@@ -133,6 +152,13 @@ struct String8 {
     const char* string() const { return value.c_str(); }
 };
 struct Parameters {};
+struct BoundaryMutex {
+    std::mutex inner;
+    bool held=false;
+    void lock() { inner.lock(); held=true; }
+    void unlock() { held=false; inner.unlock(); }
+};
+static int bufferRequests, failBufferRequest=-1;
 struct CameraHardwareInterface {
     static std::vector<CameraHardwareInterface*> allocated;
     static void* operator new(size_t bytes) {
@@ -150,14 +176,20 @@ struct CameraHardwareInterface {
         size_t mBufSize = 32;
         unsigned mNumBufs = 2;
         sp<IMemory> mBuffers[2];
+        sp<IMemory> getBuffer(uint32_t index) {
+            if (++bufferRequests==failBufferRequest) return nullptr;
+            return mBuffers[index];
+        }
+        sp<IMemoryHeap> mHeap;
         camera_memory_t handle{this};
     };
     std::unordered_map<int, camera_memory_t*> mHidlMemPoolMap;
-    std::mutex mHidlMemPoolMapLock;
+    BoundaryMutex mHidlMemPoolMapLock;
     sp<Device> mHidlDevice;
     void* mCbUser = nullptr;
     void (*mDataCbTimestampBatch)(int32_t,const std::vector<android::HandleTimestampMessage>&,void*)=nullptr;
     void releaseRecordingFrameBatch(const std::vector<sp<IMemory>>&);
+    void releaseUndeliveredRecordingFrame(uint32_t,uint32_t,const hidl_handle&);
     hardware::Return<void> handleCallbackTimestampBatch(DataCallbackMsg,const hardware::hidl_vec<hardware::camera::device::V1_0::HandleTimestampMessage>&);
     void (*mNotifyCb)(int32_t,int32_t,int32_t,void*) = nullptr;
     void (*mDataCb)(int32_t,sp<IMemory>,camera_frame_metadata_t*,void*) = nullptr;
@@ -206,7 +238,7 @@ int main() {
     CameraHardwareInterface camera;
     IMemoryHeap heap;
     IMemory memory{&heap,32,32,{}}, other{&heap,0,32,{}};
-    CameraHardwareInterface::CameraHeapMemory pool{32,2,{&other,&memory}};
+    CameraHardwareInterface::CameraHeapMemory pool{32,2,{&other,&memory},&heap};
     camera_memory_t registered{&pool};
     camera.mHidlMemPoolMap[7] = &registered;
     uint32_t id = 99, slot = 99;
@@ -240,6 +272,11 @@ int main() {
     camera.sDataCbTimestamp(1,2,&registered,2,&camera);
     check(callbacks==3,"invalid callback indices");
     native_handle_t frame;
+    other.metadata.eType=-9;
+    other.metadata.pHandle=&frame;
+    camera.handleCallbackTimestamp(1,{},7,0,1);
+    check(callbacks==3 && other.metadata.eType==-9 && other.metadata.pHandle==&frame,
+          "null handle preserves metadata and suppresses dispatch");
     camera.handleCallbackTimestamp(1,{&frame},7,2,1);
     check(callbacks==3,"invalid handle index");
     pool.mBufSize=1;
@@ -261,6 +298,7 @@ int main() {
     other.metadata.eType=-1; memory.metadata.eType=-1;
     camera.handleCallbackTimestampBatch(1,{{&frame,7,0,1},{&frame,7,1,2}});
     check(callbacks==5,"valid batch callback");
+    camera.handleCallbackTimestampBatch(1,{{nullptr,7,0,1}});
     camera.handleCallbackTimestampBatch(1,{{&frame,7,2,1}});
     camera.handleCallbackTimestampBatch(1,{{&frame,8,0,1}});
     pool.mBufSize=1;
@@ -272,6 +310,30 @@ int main() {
     check(callbacks==5,"absent batch callback");
     Device device;
     camera.mHidlDevice=&device;
+    for (int scenario=0; scenario<5; ++scenario) {
+        const int delivered=callbacks;
+        bufferRequests=0;
+        failBufferRequest=scenario==4 ? 2 : 1;
+        std::vector<uint32_t> returned;
+        frameReturnHook=[&](uint32_t poolId,uint32_t index,bool handle) {
+            check(!camera.mHidlMemPoolMapLock.held,"frame return runs outside pool mutex");
+            check(poolId==7 && handle==(scenario>=2),"correct raw or native-handle return");
+            returned.push_back(index);
+        };
+        if (scenario==0) camera.sDataCb(CAMERA_MSG_VIDEO_FRAME,&registered,0,nullptr,&camera);
+        if (scenario==1) camera.sDataCbTimestamp(1,CAMERA_MSG_VIDEO_FRAME,&registered,0,&camera);
+        if (scenario==2) camera.handleCallbackTimestamp(CAMERA_MSG_VIDEO_FRAME,{&frame},7,0,1);
+        if (scenario>=3) camera.handleCallbackTimestampBatch(CAMERA_MSG_VIDEO_FRAME,
+                {{&frame,7,0,1},{&frame,7,1,2}});
+        check(callbacks==delivered,"allocation failure suppresses frame dispatch");
+        check(returned==(scenario>=3 ? std::vector<uint32_t>{0,1} : std::vector<uint32_t>{0}),
+              "every undispatched valid frame returns to HAL exactly once");
+    }
+    failBufferRequest=-1;
+    frameReturnHook=nullptr;
+    frameReturnTransport=false;
+    camera.releaseUndeliveredRecordingFrame(7,0,{&frame});
+    frameReturnTransport=true;
     for (int scenario=0; scenario<6; ++scenario) {
         IMemory first{&heap,0,sizeof(VideoNativeHandleMetadata),{}};
         IMemory second{&heap,static_cast<ssize_t>(sizeof(VideoNativeHandleMetadata)),sizeof(VideoNativeHandleMetadata),{}};
@@ -367,6 +429,7 @@ class Hal1ReviewBoundaries(unittest.TestCase):
         manager = (ROOT / "common/CameraProviderManager.cpp").read_text()
         signatures = (
             "bool CameraHardwareInterface::getRecordingFrameSlot(",
+            "void CameraHardwareInterface::releaseUndeliveredRecordingFrame(",
             "status_t CameraHardwareInterface::dump(",
             "void CameraHardwareInterface::sNotifyCb(",
             "void CameraHardwareInterface::sDataCb(",
@@ -376,6 +439,9 @@ class Hal1ReviewBoundaries(unittest.TestCase):
             "void CameraHardwareInterface::releaseRecordingFrameBatch(",
         )
         extracted = "\n".join(function(source, signature) for signature in signatures)
+        extracted = extracted.replace(
+            "std::lock_guard<std::mutex>", "std::lock_guard<BoundaryMutex>"
+        )
         extracted += function(
             manager, "void CameraProviderManager::ProviderInfo::removeDevice("
         )

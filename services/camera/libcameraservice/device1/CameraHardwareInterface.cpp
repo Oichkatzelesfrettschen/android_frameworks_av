@@ -18,6 +18,9 @@
 
 #include <inttypes.h>
 #include <memory>
+#include <limits>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <media/hardware/HardwareAPI.h> // For VideoNativeHandleMetadata
 #include "CameraHardwareInterface.h"
 
@@ -31,16 +34,28 @@ CameraHardwareInterface::~CameraHardwareInterface()
 {
     ALOGI("Destroying camera %s", mName.string());
     if (mHidlDevice != nullptr) {
-        mHidlDevice->close();
-        mHidlDevice.clear();
+        auto result = mHidlDevice->close();
+        if (!result.isOk()) {
+            ALOGE("%s: camera close transport fails", __FUNCTION__);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+            mHidlDevice.clear();
+        }
         cleanupCirculatingBuffers();
     }
+    releaseMemoryPools();
 }
 
 status_t CameraHardwareInterface::initialize(sp<CameraProviderManager> manager) {
     ALOGI("Opening camera %s", mName.string());
 
-    status_t ret = manager->openSession(mName.string(), this, &mHidlDevice);
+    decltype(mHidlDevice) device;
+    status_t ret = manager->openSession(mName.string(), this, &device);
+    {
+        std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+        mHidlDevice = device;
+    }
     if (ret != OK) {
         ALOGE("%s: openSession failed! %s (%d)", __FUNCTION__, strerror(-ret), ret);
     }
@@ -97,15 +112,25 @@ hardware::Return<uint32_t> CameraHardwareInterface::registerMemory(
         return 0;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+        if (mMemoryRegistrationClosed) return 0;
+    }
     camera_memory_t* mem = sGetMemory(descriptor->data[0], bufferSize, bufferCount, this);
+    if (mem == nullptr) return 0;
     sp<CameraHeapMemory> camMem(static_cast<CameraHeapMemory *>(mem->handle));
     int memPoolId = camMem->mHeap->getHeapID();
-    if (memPoolId < 0) {
-        ALOGE("%s: CameraHeapMemory has FD %d (expect >= 0)", __FUNCTION__, memPoolId);
+    bool inserted = false;
+    if (memPoolId > 0) {
+        std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+        if (!mMemoryRegistrationClosed) {
+            inserted = mHidlMemPoolMap.emplace(memPoolId, mem).second;
+        }
+    }
+    if (!inserted) {
+        sPutMemory(mem);
         return 0;
     }
-    std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
-    mHidlMemPoolMap.insert(std::make_pair(memPoolId, mem));
     return memPoolId;
 }
 
@@ -162,6 +187,10 @@ hardware::Return<void> CameraHardwareInterface::dataCallbackTimestamp(
 hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
         DataCallbackMsg msgType, const hidl_handle& frameData, uint32_t data,
         uint32_t bufferIndex, int64_t timestamp) {
+    if (frameData.getNativeHandle() == nullptr) {
+        ALOGE("%s: recording handle is null", __FUNCTION__);
+        return hardware::Void();
+    }
     sp<CameraHeapMemory> heapMem;
     {
         std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
@@ -180,11 +209,19 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
     //       (see declaration for details).
     //       Either document why it is safe in this case or address the
     //       issue (e.g. by copying).
-    VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
-            heapMem->mBuffers[bufferIndex]->unsecurePointer();
+    sp<MemoryBase> buffer = heapMem->getBuffer(bufferIndex);
+    if (buffer == nullptr) {
+        if ((static_cast<int32_t>(msgType) & CAMERA_MSG_VIDEO_FRAME) != 0) {
+            releaseUndeliveredRecordingFrame(data, bufferIndex, frameData);
+        }
+        return hardware::Void();
+    }
+    VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)buffer->unsecurePointer();
     md->eType = kMetadataBufferTypeNativeHandleSource;
     md->pHandle = const_cast<native_handle_t*>(frameData.getNativeHandle());
-    sDataCbTimestamp(timestamp, (int32_t) msgType, &heapMem->handle, bufferIndex, this);
+    if (mDataCbTimestamp != nullptr) {
+        mDataCbTimestamp(timestamp, (int32_t) msgType, buffer, mCbUser);
+    }
     return hardware::Void();
 }
 
@@ -193,6 +230,7 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
         const hardware::hidl_vec<hardware::camera::device::V1_0::HandleTimestampMessage>& messages) {
     std::vector<android::HandleTimestampMessage> msgs;
     msgs.reserve(messages.size());
+    bool allocationFailed = false;
     {
         std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
         for (const auto& hidl_msg : messages) {
@@ -203,7 +241,8 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
             sp<CameraHeapMemory> mem(
                     static_cast<CameraHeapMemory *>(mHidlMemPoolMap.at(hidl_msg.data)->handle));
 
-            if (hidl_msg.bufferIndex >= mem->mNumBufs ||
+            if (hidl_msg.frameData.getNativeHandle() == nullptr ||
+                    hidl_msg.bufferIndex >= mem->mNumBufs ||
                     mem->mBufSize < sizeof(VideoNativeHandleMetadata)) {
                 ALOGE("%s: invalid buffer index %d, max allowed is %d", __FUNCTION__,
                      hidl_msg.bufferIndex, mem->mNumBufs);
@@ -213,13 +252,28 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
             //       (see declaration for details).
             //       Either document why it is safe in this case or address the
             //       issue (e.g. by copying).
-            VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
-                    mem->mBuffers[hidl_msg.bufferIndex]->unsecurePointer();
+            sp<MemoryBase> buffer = mem->getBuffer(hidl_msg.bufferIndex);
+            if (buffer == nullptr) {
+                allocationFailed = true;
+                break;
+            }
+            VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)buffer->unsecurePointer();
             md->eType = kMetadataBufferTypeNativeHandleSource;
             md->pHandle = const_cast<native_handle_t*>(hidl_msg.frameData.getNativeHandle());
 
-            msgs.push_back({hidl_msg.timestamp, mem->mBuffers[hidl_msg.bufferIndex]});
+            msgs.push_back({hidl_msg.timestamp, buffer});
         }
+    }
+    if (allocationFailed) {
+        if ((static_cast<int32_t>(msgType) & CAMERA_MSG_VIDEO_FRAME) != 0) {
+            for (const auto& message : messages) {
+                if (message.frameData.getNativeHandle() != nullptr) {
+                    releaseUndeliveredRecordingFrame(message.data, message.bufferIndex,
+                            message.frameData);
+                }
+            }
+        }
+        return hardware::Void();
     }
     if (mDataCbTimestampBatch != nullptr) {
         mDataCbTimestampBatch((int32_t) msgType, msgs, mCbUser);
@@ -853,9 +907,16 @@ status_t CameraHardwareInterface::sendCommand(int32_t cmd, int32_t arg1, int32_t
 void CameraHardwareInterface::release() {
     ALOGV("%s(%s)", __FUNCTION__, mName.string());
     if (CC_LIKELY(mHidlDevice != nullptr)) {
-        mHidlDevice->close();
-        mHidlDevice.clear();
+        auto result = mHidlDevice->close();
+        if (!result.isOk()) {
+            ALOGE("%s: camera close transport fails", __FUNCTION__);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+            mHidlDevice.clear();
+        }
     }
+    releaseMemoryPools();
 }
 
 /**
@@ -902,7 +963,14 @@ void CameraHardwareInterface::sDataCb(int32_t msg_type,
         return;
     }
     if (object->mDataCb != nullptr) {
-        object->mDataCb(msg_type, mem->mBuffers[index], metadata, object->mCbUser);
+        sp<MemoryBase> buffer = mem->getBuffer(index);
+        if (buffer == nullptr) {
+            if ((msg_type & CAMERA_MSG_VIDEO_FRAME) != 0) {
+                object->releaseUndeliveredRecordingFrame(mem->mHeap->getHeapID(), index, {});
+            }
+            return;
+        }
+        object->mDataCb(msg_type, buffer, metadata, object->mCbUser);
     }
 }
 
@@ -923,7 +991,14 @@ void CameraHardwareInterface::sDataCbTimestamp(nsecs_t timestamp, int32_t msg_ty
         return;
     }
     if (object->mDataCbTimestamp != nullptr) {
-        object->mDataCbTimestamp(timestamp, msg_type, mem->mBuffers[index], object->mCbUser);
+        sp<MemoryBase> buffer = mem->getBuffer(index);
+        if (buffer == nullptr) {
+            if ((msg_type & CAMERA_MSG_VIDEO_FRAME) != 0) {
+                object->releaseUndeliveredRecordingFrame(mem->mHeap->getHeapID(), index, {});
+            }
+            return;
+        }
+        object->mDataCbTimestamp(timestamp, msg_type, buffer, object->mCbUser);
     }
 }
 
@@ -931,14 +1006,62 @@ camera_memory_t* CameraHardwareInterface::sGetMemory(
         int fd, size_t buf_size, uint_t num_bufs,
         void *user __attribute__((unused)))
 {
-    CameraHeapMemory *mem;
-    if (fd < 0) {
-        mem = new CameraHeapMemory(buf_size, num_bufs);
-    } else {
-        mem = new CameraHeapMemory(fd, buf_size, num_bufs);
+    // MemoryBase offsets use ssize_t; MemoryHeapBase rounds the heap to pages.
+    const size_t pageSize = static_cast<size_t>(getpagesize());
+    const size_t maxHeapSize = static_cast<size_t>(std::numeric_limits<ssize_t>::max())
+            - (pageSize - 1);
+    if (buf_size == 0 || num_bufs == 0 || buf_size > maxHeapSize / num_bufs) {
+        ALOGE("%s: invalid camera memory dimensions", __FUNCTION__);
+        return nullptr;
     }
-    mem->incStrong(mem);
+    sp<CameraHeapMemory> mem = fd < 0
+            ? new (std::nothrow) CameraHeapMemory(buf_size, num_bufs)
+            : new (std::nothrow) CameraHeapMemory(fd, buf_size, num_bufs);
+    if (mem == nullptr || mem->mHeap == nullptr || mem->mHeap->getHeapID() < 0 ||
+            mem->mHeap->base() == MAP_FAILED || mem->mHeap->getSize() < buf_size * num_bufs) {
+        ALOGE("%s: camera memory allocation or mapping fails", __FUNCTION__);
+        return nullptr;
+    }
+    mem->incStrong(mem.get());
     return &mem->handle;
+}
+
+void CameraHardwareInterface::releaseUndeliveredRecordingFrame(
+        uint32_t poolId, uint32_t bufferIndex, const hidl_handle& frame) {
+    decltype(mHidlDevice) device;
+    sp<CameraHeapMemory> pool;
+    {
+        std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+        auto found = mHidlMemPoolMap.find(poolId);
+        if (found == mHidlMemPoolMap.end()) return;
+        pool = static_cast<CameraHeapMemory*>(found->second->handle);
+        if (bufferIndex >= pool->mNumBufs ||
+                (frame.getNativeHandle() != nullptr &&
+                pool->mBufSize < sizeof(VideoNativeHandleMetadata))) return;
+        device = mHidlDevice;
+    }
+    // HIDL returns the borrowed frame before callback ownership expires.
+    if (device != nullptr) {
+        auto result = frame.getNativeHandle() == nullptr
+                ? device->releaseRecordingFrame(poolId, bufferIndex)
+                : device->releaseRecordingFrameHandle(poolId, bufferIndex, frame);
+        if (!result.isOk()) {
+            ALOGE("%s: undelivered recording frame return fails", __FUNCTION__);
+        }
+    }
+}
+
+void CameraHardwareInterface::releaseMemoryPools() {
+    decltype(mHidlMemPoolMap) pools;
+    {
+        std::lock_guard<std::mutex> lock(mHidlMemPoolMapLock);
+        mMemoryRegistrationClosed = true;
+        pools.swap(mHidlMemPoolMap);
+    }
+    // Callback-local strong references keep in-flight heaps alive after removal.
+    for (const auto& pool : pools) {
+        sPutMemory(pool.second);
+    }
 }
 
 void CameraHardwareInterface::sPutMemory(camera_memory_t *data)

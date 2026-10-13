@@ -17,6 +17,7 @@
 //#define LOG_NDEBUG 0
 
 #include <inttypes.h>
+#include <memory>
 #include <media/hardware/HardwareAPI.h> // For VideoNativeHandleMetadata
 #include "CameraHardwareInterface.h"
 
@@ -181,6 +182,7 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestamp(
     //       issue (e.g. by copying).
     VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
             heapMem->mBuffers[bufferIndex]->unsecurePointer();
+    md->eType = kMetadataBufferTypeNativeHandleSource;
     md->pHandle = const_cast<native_handle_t*>(frameData.getNativeHandle());
     sDataCbTimestamp(timestamp, (int32_t) msgType, &heapMem->handle, bufferIndex, this);
     return hardware::Void();
@@ -213,6 +215,7 @@ hardware::Return<void> CameraHardwareInterface::handleCallbackTimestampBatch(
             //       issue (e.g. by copying).
             VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*)
                     mem->mBuffers[hidl_msg.bufferIndex]->unsecurePointer();
+            md->eType = kMetadataBufferTypeNativeHandleSource;
             md->pHandle = const_cast<native_handle_t*>(hidl_msg.frameData.getNativeHandle());
 
             msgs.push_back({hidl_msg.timestamp, mem->mBuffers[hidl_msg.bufferIndex]});
@@ -693,38 +696,33 @@ void CameraHardwareInterface::releaseRecordingFrameHandle(const sp<IMemory>& mem
 void CameraHardwareInterface::releaseRecordingFrameBatch(const std::vector<sp<IMemory>>& frames)
 {
     ALOGV("%s(%s)", __FUNCTION__, mName.string());
-    if (mHidlDevice == nullptr) return;
-    size_t n = frames.size();
+    const auto releaseHandle = [](native_handle_t* handle) {
+        native_handle_close(handle);
+        native_handle_delete(handle);
+    };
+    // CameraClient transfers every original handle, including unregistered slots.
+    // The HAL can replace shared metadata with a clone during release.
+    std::vector<std::unique_ptr<native_handle_t, decltype(releaseHandle)>> ownedHandles;
+    ownedHandles.reserve(frames.size());
     std::vector<VideoFrameMessage> msgs;
-    msgs.reserve(n);
-    for (auto& mem : frames) {
-        if (CC_LIKELY(mHidlDevice != nullptr)) {
-            uint32_t heapId;
-            uint32_t bufferIndex;
-            if (!getRecordingFrameSlot(mem, &heapId, &bufferIndex)) continue;
-            if (mem->size() == sizeof(VideoNativeHandleMetadata)) {
-                // TODO: Using unsecurePointer() has some associated security pitfalls
-                //       (see declaration for details).
-                //       Either document why it is safe in this case or address the
-                //       issue (e.g. by copying).
-                VideoNativeHandleMetadata* md = (VideoNativeHandleMetadata*) mem->unsecurePointer();
-                // Caching the handle here because md->pHandle will be subject to HAL's edit
-                native_handle_t* nh = md->pHandle;
-                VideoFrameMessage msg;
-                msgs.push_back({nh, heapId, bufferIndex});
-            } else {
-                ALOGE("%s only supports VideoNativeHandleMetadata mode", __FUNCTION__);
-                return;
-            }
+    msgs.reserve(frames.size());
+    for (const auto& mem : frames) {
+        if (mem == nullptr || mem->size() != sizeof(VideoNativeHandleMetadata)) {
+            ALOGE("%s only supports VideoNativeHandleMetadata mode", __FUNCTION__);
+            continue;
+        }
+        auto* metadata = static_cast<VideoNativeHandleMetadata*>(mem->unsecurePointer());
+        native_handle_t* handle = metadata->pHandle;
+        ownedHandles.emplace_back(handle, releaseHandle);
+        uint32_t heapId;
+        uint32_t bufferIndex;
+        if (handle != nullptr && mHidlDevice != nullptr &&
+                getRecordingFrameSlot(mem, &heapId, &bufferIndex)) {
+            msgs.push_back({handle, heapId, bufferIndex});
         }
     }
-
-    mHidlDevice->releaseRecordingFrameHandleBatch(msgs);
-
-    for (auto& msg : msgs) {
-        native_handle_t* nh = const_cast<native_handle_t*>(msg.frameData.getNativeHandle());
-        native_handle_close(nh);
-        native_handle_delete(nh);
+    if (!msgs.empty()) {
+        mHidlDevice->releaseRecordingFrameHandleBatch(msgs);
     }
 }
 

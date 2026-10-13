@@ -374,6 +374,13 @@ void CameraService::addStates(const String8 id) {
         ALOGE("Failed to query device kind: %s (%d)", strerror(-res), res);
         return;
     }
+    bool supportsHAL3 = false;
+    binder::Status capability = supportsCameraApi(String16(id),
+            hardware::ICameraService::API_VERSION_2, &supportsHAL3);
+    if (!capability.isOk()) {
+        ALOGE("Failed to query camera API capability for %s", id.string());
+        return;
+    }
     std::set<String8> conflicting;
     for (size_t i = 0; i < cost.conflictingDevices.size(); i++) {
         conflicting.emplace(String8(cost.conflictingDevices[i].c_str()));
@@ -382,7 +389,7 @@ void CameraService::addStates(const String8 id) {
     {
         Mutex::Autolock lock(mCameraStatesLock);
         mCameraStates.emplace(id, std::make_shared<CameraState>(id, cost.resourceCost,
-                                                                conflicting, deviceKind));
+                                                                conflicting, deviceKind, supportsHAL3));
     }
 
     if (mFlashlight->hasFlashUnit(id)) {
@@ -3788,9 +3795,10 @@ bool CameraService::SensorPrivacyPolicy::hasCameraPrivacyFeature() {
 // ----------------------------------------------------------------------------
 
 CameraService::CameraState::CameraState(const String8& id, int cost,
-        const std::set<String8>& conflicting, SystemCameraKind systemCameraKind) : mId(id),
+        const std::set<String8>& conflicting, SystemCameraKind systemCameraKind,
+        bool supportsHAL3) : mId(id),
         mStatus(StatusInternal::NOT_PRESENT), mCost(cost), mConflicting(conflicting),
-        mSystemCameraKind(systemCameraKind) {}
+        mSystemCameraKind(systemCameraKind), mSupportsHAL3(supportsHAL3) {}
 
 CameraService::CameraState::~CameraState() {}
 
@@ -3827,6 +3835,10 @@ String8 CameraService::CameraState::getId() const {
 
 SystemCameraKind CameraService::CameraState::getSystemCameraKind() const {
     return mSystemCameraKind;
+}
+
+bool CameraService::CameraState::supportsHAL3() const {
+    return mSupportsHAL3;
 }
 
 bool CameraService::CameraState::addUnavailablePhysicalId(const String8& physicalId) {
@@ -4304,19 +4316,8 @@ void CameraService::updateStatus(StatusInternal status, const String8& cameraId,
         ALOGE("%s: Invalid camera id %s, skipping", __FUNCTION__, cameraId.string());
         return;
     }
-    bool supportsHAL3 = false;
-    // supportsCameraApi also holds mInterfaceMutex, we can't call it in the
-    // HIDL onStatusChanged wrapper call (we'll hold mStatusListenerLock and
-    // mInterfaceMutex together, which can lead to deadlocks)
-    binder::Status sRet =
-            supportsCameraApi(String16(cameraId), hardware::ICameraService::API_VERSION_2,
-                    &supportsHAL3);
-    if (!sRet.isOk()) {
-        // A device the provider already removed has no DeviceInfo; its status
-        // update still reaches non-vendor listeners with supportsHAL3 false.
-        ALOGW("%s: Failed to determine if device supports HAL3 %s, supportsCameraApi call failed",
-                __FUNCTION__, cameraId.string());
-    }
+    // DeviceInfo disappears before NOT_PRESENT reaches the service.
+    const bool supportsHAL3 = state->supportsHAL3();
 
     // Collect the logical cameras without holding mStatusLock in updateStatus
     // as that can lead to a deadlock(b/162192331).

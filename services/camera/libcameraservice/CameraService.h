@@ -583,7 +583,7 @@ private:
          * returned in the HAL's camera_info struct for each device.
          */
         CameraState(const String8& id, int cost, const std::set<String8>& conflicting,
-                SystemCameraKind deviceKind);
+                SystemCameraKind deviceKind, bool supportsHAL3);
         virtual ~CameraState();
 
         /**
@@ -640,6 +640,9 @@ private:
          */
         SystemCameraKind getSystemCameraKind() const;
 
+        // Retain discovery capability through provider removal notifications.
+        bool supportsHAL3() const;
+
         /**
          * Add/Remove the unavailable physical camera ID.
          */
@@ -661,6 +664,7 @@ private:
         mutable Mutex mStatusLock;
         CameraParameters mShimParams;
         const SystemCameraKind mSystemCameraKind;
+        const bool mSupportsHAL3;
     }; // class CameraState
 
     // Observer for UID lifecycle enforcing that UIDs in idle

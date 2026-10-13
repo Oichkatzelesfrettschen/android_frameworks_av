@@ -72,6 +72,7 @@ class CameraService :
     public virtual CameraProviderManager::StatusListener
 {
     friend class BinderService<CameraService>;
+    friend class CameraClient;
     friend class CameraOfflineSessionClient;
 public:
     class Client;
@@ -142,6 +143,17 @@ public:
             int32_t clientUid, int clientPid, int targetSdkVersion,
             /*out*/
             sp<hardware::ICamera>* device);
+
+    virtual binder::Status     connectLegacy(const sp<hardware::ICameraClient>& cameraClient,
+            int32_t cameraId, int32_t halVersion,
+            const String16& clientPackageName, int32_t clientUid, int clientPid,
+            /*out*/
+            sp<hardware::ICamera>* device);
+
+    virtual binder::Status     connectLegacyWithOomScoreOffset(
+            const sp<hardware::ICameraClient>& cameraClient, int32_t cameraId, int32_t halVersion,
+            const String16& clientPackageName, int32_t clientUid, int clientPid, int oomScoreOffset,
+            /*out*/ sp<hardware::ICamera>* device);
 
     virtual binder::Status     connectDevice(
             const sp<hardware::camera2::ICameraDeviceCallbacks>& cameraCb, const String16& cameraId,
@@ -571,7 +583,7 @@ private:
          * returned in the HAL's camera_info struct for each device.
          */
         CameraState(const String8& id, int cost, const std::set<String8>& conflicting,
-                SystemCameraKind deviceKind);
+                SystemCameraKind deviceKind, bool supportsHAL3);
         virtual ~CameraState();
 
         /**
@@ -628,6 +640,9 @@ private:
          */
         SystemCameraKind getSystemCameraKind() const;
 
+        // Retain discovery capability through provider removal notifications.
+        bool supportsHAL3() const;
+
         /**
          * Add/Remove the unavailable physical camera ID.
          */
@@ -649,6 +664,7 @@ private:
         mutable Mutex mStatusLock;
         CameraParameters mShimParams;
         const SystemCameraKind mSystemCameraKind;
+        const bool mSupportsHAL3;
     }; // class CameraState
 
     // Observer for UID lifecycle enforcing that UIDs in idle
@@ -782,10 +798,14 @@ private:
     // sorted in alpha-numeric order.
     void filterAPI1SystemCameraLocked(const std::vector<std::string> &normalDeviceIds);
 
+    // Validate priority changes against the Binder caller's SYSTEM_CAMERA permission.
+    binder::Status validateOomScoreOffset(const String8& cameraId,
+            const String16& clientPackageName, int oomScoreOffset);
+
     // Single implementation shared between the various connect calls
     template<class CALLBACK, class CLIENT>
     binder::Status connectHelper(const sp<CALLBACK>& cameraCb, const String8& cameraId,
-            int api1CameraId, const String16& clientPackageName,
+            int api1CameraId, int halVersion, const String16& clientPackageName,
             const std::optional<String16>& clientFeatureId, int clientUid, int clientPid,
             apiLevel effectiveApiLevel, bool shimUpdateOnly, int scoreOffset, int targetSdkVersion,
             /*out*/sp<CLIENT>& device);
@@ -1154,7 +1174,7 @@ private:
             const sp<IInterface>& cameraCb, const String16& packageName,
             const std::optional<String16>& featureId, const String8& cameraId, int api1CameraId,
             int facing, int sensorOrientation, int clientPid, uid_t clientUid, int servicePid,
-            int deviceVersion, apiLevel effectiveApiLevel, bool overrideForPerfClass,
+            int halVersion, int deviceVersion, apiLevel effectiveApiLevel, bool overrideForPerfClass,
             /*out*/sp<BasicClient>* client);
 
     status_t checkCameraAccess(const String16& opPackageName);

@@ -71,7 +71,7 @@ interface ICameraService
 
     /**
      * Default UID/PID values for non-privileged callers of
-     * connect() and connectDevice()
+     * connect(), connectDevice(), and connectLegacy()
      */
     const int USE_CALLING_UID = -1;
     const int USE_CALLING_PID = -1;
@@ -95,6 +95,20 @@ interface ICameraService
             @nullable String featureId,
             int clientUid, int oomScoreOffset,
             int targetSdkVersion);
+
+    /**
+     * halVersion constant for connectLegacy
+     */
+    const int CAMERA_HAL_API_VERSION_UNSPECIFIED = -1;
+
+    /**
+     * Open a camera device in legacy mode, if supported by the camera module HAL.
+     */
+    ICamera connectLegacy(ICameraClient client,
+            int cameraId,
+            int halVersion,
+            String opPackageName,
+            int clientUid, int clientPid);
 
     /**
      * Add listener for changes to camera device and flashlight state.
@@ -209,5 +223,13 @@ interface ICameraService
     const int DEVICE_STATE_FRONT_COVERED = 2;
     const int DEVICE_STATE_FOLDED = 4;
     const int DEVICE_STATE_LAST_FRAMEWORK_BIT = 0x80000000; // 1 << 31;
+
+    /**
+     * Open a legacy device with the same priority-offset policy as connectDevice.
+     * The appended method preserves the existing camera-service transaction IDs.
+     */
+    ICamera connectLegacyWithOomScoreOffset(ICameraClient client,
+            int cameraId, int halVersion, String opPackageName,
+            int clientUid, int clientPid, int oomScoreOffset);
 
 }

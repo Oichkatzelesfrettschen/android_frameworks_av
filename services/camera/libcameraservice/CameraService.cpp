@@ -896,7 +896,7 @@ Status CameraService::makeClient(const sp<CameraService>& cameraService,
         int servicePid, int halVersion, int deviceVersion, apiLevel effectiveApiLevel, bool overrideForPerfClass,
         /*out*/sp<BasicClient>* client) {
 
-    if (halVersion < 0 || halVersion == deviceVersion) {
+    if (halVersion == CAMERA_HAL_API_VERSION_UNSPECIFIED || halVersion == deviceVersion) {
         // Default path: HAL version is unspecified by caller, create CameraClient
         // based on device version reported by the HAL.
         switch(deviceVersion) {

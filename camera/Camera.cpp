@@ -127,7 +127,7 @@ status_t Camera::connectLegacy(int cameraId, int halVersion,
             default:
                 status = -EINVAL;
                 ALOGW("An error occurred while connecting to camera %d: %s", cameraId,
-                        (cs != nullptr) ? "Service not available" : ret.toString8().string());
+                        (cs == nullptr) ? "Service not available" : ret.toString8().string());
                 break;
         }
         c.clear();
@@ -199,6 +199,13 @@ status_t Camera::startRecording()
     ALOGV("startRecording");
     sp <::android::hardware::ICamera> c = mCamera;
     if (c == 0) return NO_INIT;
+    {
+        Mutex::Autolock _l(mLock);
+        if (mRecordingProxyStopped) {
+            mRecordingProxyListener.clear();
+            mRecordingProxyStopped = false;
+        }
+    }
     return c->startRecording();
 }
 
@@ -211,15 +218,60 @@ void Camera::stopPreview()
     c->stopPreview();
 }
 
+// Queued one-way recording callbacks retain a release path after proxy stop.
+// A weak endpoint avoids extending the camera connection lifetime.
+class RecordingFrameReleaser : public BnCameraRecordingProxyListener {
+public:
+    explicit RecordingFrameReleaser(const sp<::android::hardware::ICamera>& camera)
+          : mCamera(camera) {}
+
+    void dataCallbackTimestamp(nsecs_t, int32_t, const sp<IMemory>& memory) override {
+        sp<::android::hardware::ICamera> camera = mCamera.promote();
+        if (camera != nullptr) camera->releaseRecordingFrame(memory);
+    }
+
+    void recordingFrameHandleCallbackTimestamp(nsecs_t, native_handle_t* handle) override {
+        sp<::android::hardware::ICamera> camera = mCamera.promote();
+        if (camera != nullptr) {
+            camera->releaseRecordingFrameHandle(handle);
+        } else if (handle != nullptr) {
+            native_handle_close(handle);
+            native_handle_delete(handle);
+        }
+    }
+
+    void recordingFrameHandleCallbackTimestampBatch(
+            const std::vector<nsecs_t>&,
+            const std::vector<native_handle_t*>& handles) override {
+        sp<::android::hardware::ICamera> camera = mCamera.promote();
+        if (camera != nullptr) {
+            camera->releaseRecordingFrameHandleBatch(handles);
+        } else {
+            for (auto* handle : handles) {
+                if (handle != nullptr) {
+                    native_handle_close(handle);
+                    native_handle_delete(handle);
+                }
+            }
+        }
+    }
+
+private:
+    wp<::android::hardware::ICamera> mCamera;
+};
+
 // stop recording mode
 void Camera::stopRecording()
 {
     ALOGV("stopRecording");
+    sp <::android::hardware::ICamera> c = mCamera;
     {
         Mutex::Autolock _l(mLock);
-        mRecordingProxyListener.clear();
+        if (mRecordingProxyListener != nullptr) {
+            mRecordingProxyListener = new RecordingFrameReleaser(c);
+            mRecordingProxyStopped = true;
+        }
     }
-    sp <::android::hardware::ICamera> c = mCamera;
     if (c == 0) return;
     c->stopRecording();
 }
@@ -330,6 +382,7 @@ void Camera::setRecordingProxyListener(const sp<ICameraRecordingProxyListener>& 
 {
     Mutex::Autolock _l(mLock);
     mRecordingProxyListener = listener;
+    mRecordingProxyStopped = false;
 }
 
 void Camera::setPreviewCallbackFlags(int flag)

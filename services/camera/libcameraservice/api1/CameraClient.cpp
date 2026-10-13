@@ -314,8 +314,8 @@ status_t CameraClient::setPreviewWindow(const sp<IBinder>& binder,
         if (window != 0) {
             mHardware->setPreviewScalingMode(NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
             mHardware->setPreviewTransform(mOrientation);
-            result = mHardware->setPreviewWindow(window);
         }
+        result = mHardware->setPreviewWindow(window);
     }
 
     if (result == NO_ERROR) {
